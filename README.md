@@ -21,8 +21,6 @@ The project is being developed as both:
 - an educational platform for understanding the Finite Element Method from the implementation level,
 - and a research-oriented codebase for experimenting with geotechnical constitutive models, nonlinear solution procedures, staged construction, and soil–structure problems.
 
-Rather than treating the FEM solver as a black box, GeoPyFEM is intended to keep the main numerical procedures transparent and modular so that each part of the formulation can be studied, modified, and extended.
-
 ---
 
 ## Current Capabilities
@@ -136,53 +134,13 @@ python3 main.py 2material_problem.xml
 
 > The input format and installation procedure are still evolving. A more complete user guide and example collection will be added as the project matures.
 
----
-
-## Example Problems
-
-The repository contains development and verification models covering topics such as:
-
-- linear elastic continuum problems,
-- gravity loading,
-- K0 initial stress,
-- nonlinear material response,
-- staged loading,
-- groundwater-stage changes,
-- embankment construction,
-- element activation and deactivation,
-- and excavation.
-
-These examples are primarily used for code verification and development.
 
 ---
 
-## Development Roadmap
-
-Planned development includes:
-
-- [ ] Improved automated verification and regression testing
-- [ ] Expanded documentation and example problems
-- [ ] Mohr–Coulomb elastoplastic model
-- [ ] Robust stress-return algorithms for face, edge, and apex conditions
-- [ ] Modified Cam Clay
-- [ ] More advanced geotechnical constitutive models
-- [ ] Coupled hydro-mechanical analysis
-- [ ] Improved sparse-matrix assembly and solver performance
-- [ ] Additional continuum element formulations
-- [ ] More advanced staged-construction capabilities
-- [ ] Improved ParaView / VTK post-processing
-- [ ] Python package distribution
-
-Longer-term development is intended to support advanced constitutive modelling for geotechnical research while keeping the implementation readable enough for teaching and learning.
-
----
 
 ## Design Philosophy
 
 GeoPyFEM follows several guiding principles:
-
-**Transparency**  
-Numerical procedures should be understandable from the source code rather than hidden behind a large software abstraction layer.
 
 **Modularity**  
 Element formulations, material models, solvers, state management, loading procedures, and post-processing should remain as independent as practical.
@@ -216,9 +174,13 @@ As the project structure stabilizes, dedicated contribution guidelines and testi
 
 ## Author
 
-**Bagus Eko Prasetyo**
+**Bagus E. Prasetyo**
+**Computational Geotechnics Research Initiative**  
+Department of Civil Engineering  
+Universitas Sembilanbelas November Kolaka, Indonesia
 
-GeoPyFEM is developed as an open-source project focused on finite element implementation and computational geotechnics.
+GeoPyFEM is developed as an open-source research and educational
+finite element framework for computational geotechnics.
 
 ---
 
@@ -230,5 +192,5 @@ A formal citation will be provided when the first public GeoPyFEM software relea
 
 ## License
 
-A software license will be added as the public release structure is finalized.
+GeoPyFEM is licensed under the GNU General Public License v3.0.
 
