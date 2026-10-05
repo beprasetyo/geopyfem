@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Problem name="excavation_k0_load_release" version="0.1">
+
+  <General>
+    <Units>
+      <Length>m</Length>
+      <Force>kN</Force>
+      <Time>s</Time>
+    </Units>
+    <Dimension>2D</Dimension>
+    <Formulation>plane_strain</Formulation>
+  </General>
+
+  <Mesh>
+    <File>excav_tri6.msh</File>
+    <Format>gmsh</Format>
+  </Mesh>
+
+  <Materials>
+
+    <Material id="1" name="soil_2" region="soil2" model="LinearElastic">
+      <Parameters>
+        <E>30000.0</E>
+        <nu>0.30</nu>
+        <density>1936.8</density>
+      </Parameters>
+    </Material>
+
+    <Material id="2" name="soil_1" region="soil1" model="LinearElastic">
+      <Parameters>
+        <E>20000.0</E>
+        <nu>0.30</nu>
+        <density>1834.9</density>
+      </Parameters>
+    </Material>
+
+    <!-- soil3 and excav_soil3 are the same physical material, but separate
+         Gmsh construction regions so excav_soil3 can be removed in Stage 3. -->
+    <Material id="3" name="soil_3" region="soil3" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+    <Material id="4" name="excavation_soil_3" region="excav_soil3" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+    <!-- soil4 and excav_soil4 likewise share properties. -->
+    <Material id="5" name="soil_4" region="soil4" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+    <Material id="6" name="excavation_soil_4" region="excav_soil4" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+  </Materials>
+
+  <Groundwater enabled="true" name="initial_gwt" type="horizontal">
+    <UnitWeightWater>10</UnitWeightWater>
+    <Elevation>2.0</Elevation>
+  </Groundwater>
+
+  <BoundaryConditions>
+
+    <DisplacementBoundary name="base_fix" group="bottomfix">
+      <ux>fixed</ux>
+      <uy>fixed</uy>
+    </DisplacementBoundary>
+
+    <DisplacementBoundary name="side_rollers" group="sidefix">
+      <ux>fixed</ux>
+      <uy>free</uy>
+    </DisplacementBoundary>
+
+  </BoundaryConditions>
+
+  <Loads>
+
+    <!-- Example benchmark load only. Replace with the intended physical load. -->
+    <BoundaryLoad name="top_load" group="load" type="traction">
+      <tx>0.0</tx>
+      <ty>-100.0</ty>
+      <TimeFunction type="constant"/>
+    </BoundaryLoad>
+
+  </Loads>
+
+  <Analysis>
+    <Type>static</Type>
+    <Procedure>nonlinear</Procedure>
+    <LoadSteps>5</LoadSteps>
+    <Gravity enabled="false">
+      <gx>0.0</gx>
+      <gy>-9.81</gy>
+    </Gravity>
+  </Analysis>
+
+  <Solver>
+    <LinearSolver>direct</LinearSolver>
+
+    <NonlinearSolver>
+      <Method>NewtonRaphson</Method>
+      <MaxIterations>20</MaxIterations>
+      <ForceTolerance>1.0e-9</ForceTolerance>
+      <DisplacementTolerance>1.0e-9</DisplacementTolerance>
+
+      <!-- Fixed stepping makes the excavation-release path easy to inspect:
+           lambda = 0.2, 0.4, 0.6, 0.8, 1.0. -->
+      <LoadStepping type="fixed"/>
+    </NonlinearSolver>
+  </Solver>
+
+  <Stages>
+
+    <!-- All soil regions exist in the initial ground. -->
+    <Stage id="0" name="K0 initial stress">
+      <Procedure>K0</Procedure>
+
+      <Gravity enabled="true">
+        <gx>0.0</gx>
+        <gy>-9.81</gy>
+      </Gravity>
+
+      <!-- Example K0 values for numerical validation. -->
+      <K0>
+        <Region name="soil2" value="0.50"/>
+        <Region name="soil1" value="0.50"/>
+        <Region name="soil3" value="0.50"/>
+        <Region name="excav_soil3" value="0.50"/>
+        <Region name="soil4" value="0.50"/>
+        <Region name="excav_soil4" value="0.50"/>
+        <EquilibriumTolerance>1.0e-8</EquilibriumTolerance>
+      </K0>
+    </Stage>
+
+    <!-- Add the surface load while every soil region is still present. -->
+    <Stage id="1" name="Apply surface load">
+      <Procedure>nonlinear</Procedure>
+      <LoadSteps>5</LoadSteps>
+
+      <ActivateLoads>
+        <Load name="top_load"/>
+      </ActivateLoads>
+    </Stage>
+
+    <!-- Remove the upper excavation region. GeoPyFEM automatically creates
+         the temporary holding force and releases it over this same stage. -->
+    <Stage id="2" name="Excavate soil 4">
+      <Procedure>nonlinear</Procedure>
+      <LoadSteps>5</LoadSteps>
+
+      <DeactivateRegions>
+        <Region name="excav_soil4"/>
+      </DeactivateRegions>
+    </Stage>
+
+    <!-- Second excavation lift. The Stage-2 committed state becomes the
+         starting equilibrium state for the new holding-force calculation. -->
+    <Stage id="3" name="Excavate soil 3">
+      <Procedure>nonlinear</Procedure>
+      <LoadSteps>5</LoadSteps>
+
+      <DeactivateRegions>
+        <Region name="excav_soil3"/>
+      </DeactivateRegions>
+    </Stage>
+
+  </Stages>
+
+  <Output>
+    <VTK enabled="true">
+      <Directory>results</Directory>
+      <BaseName>excavation_k0_load_release</BaseName>
+      <WriteGaussPoints>true</WriteGaussPoints>
+    </VTK>
+    <Matplotlib enabled="false"/>
+  </Output>
+
+</Problem>

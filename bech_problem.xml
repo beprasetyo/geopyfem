@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Problem name="bench1_test" version="0.1">
+  <General>
+    <Units>
+      <Length>m</Length>
+      <Force>N</Force>
+      <Time>s</Time>
+    </Units>
+    <Dimension>2D</Dimension>
+    <Formulation>plane_strain</Formulation>
+  </General>
+  <Mesh>
+    <File>benchmark2.msh</File>
+    <Format>gmsh</Format>
+  </Mesh>
+  <Materials>
+    <Material id="1" name="soil" region="soil1" model="LinearElastic">
+      <Parameters>
+        <E>100.0e6</E>
+        <nu>0.25</nu>
+        <density>1800.0</density>
+      </Parameters>
+    </Material>
+  </Materials>  
+  <BoundaryConditions>
+    <DisplacementBoundary name="fix" group="fixed">
+      <ux>fixed</ux>
+      <uy>free</uy>
+    </DisplacementBoundary>
+    <DisplacementBoundary
+        name="bottom_left_fix"
+        group="titik">
+
+        <ux>fixed</ux>
+        <uy>fixed</uy>
+
+    </DisplacementBoundary>
+  </BoundaryConditions>
+  <Loads>
+    <BoundaryLoad name="load1" group="load" type="traction">
+      <tx>10.0e3</tx>
+      <ty>0.0</ty>
+      <TimeFunction type="constant"/>
+    </BoundaryLoad>
+  </Loads>
+  <Analysis>
+    <Type>static</Type>
+    <Procedure>linear</Procedure>
+  </Analysis>
+  <Output>
+    <Displacement>ux</Displacement>
+    <DeformationScale>1.0</DeformationScale>
+  </Output>
+</Problem>

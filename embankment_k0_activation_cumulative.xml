@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Problem name="embankment_k0_activation_cumulative" version="0.1">
+
+  <General>
+    <Units>
+      <Length>m</Length>
+      <Force>kN</Force>
+      <Time>s</Time>
+    </Units>
+    <Dimension>2D</Dimension>
+    <Formulation>plane_strain</Formulation>
+  </General>
+
+  <Mesh>
+    <File>embankment_tri6.msh</File>
+    <Format>gmsh</Format>
+  </Mesh>
+
+  <Materials>
+
+    <Material id="1" name="soil_1" region="soil1" model="LinearElastic">
+      <Parameters>
+        <E>20000.0</E>
+        <nu>0.30</nu>
+        <density>1834.9</density>
+      </Parameters>
+    </Material>
+
+    <Material id="2" name="soil_2" region="soil2" model="LinearElastic">
+      <Parameters>
+        <E>30000.0</E>
+        <nu>0.30</nu>
+        <density>1936.8</density>
+      </Parameters>
+    </Material>
+
+    <!-- Same material properties, separate construction regions. -->
+    <Material id="3" name="fill_lower" region="timbunan_bawah" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+    <Material id="4" name="fill_upper" region="timbunan_atas" model="LinearElastic">
+      <Parameters>
+        <E>15000.0</E>
+        <nu>0.30</nu>
+        <density>1732.9</density>
+      </Parameters>
+    </Material>
+
+  </Materials>
+
+  <Groundwater enabled="true" name="initial_gwt" type="horizontal">
+    <UnitWeightWater>10</UnitWeightWater>
+    <Elevation>1.0</Elevation>
+  </Groundwater>
+
+  <BoundaryConditions>
+
+    <DisplacementBoundary name="base_fix" group="bottomfix">
+      <ux>fixed</ux>
+      <uy>fixed</uy>
+    </DisplacementBoundary>
+
+    <DisplacementBoundary name="side_rollers" group="sidefix">
+      <ux>fixed</ux>
+      <uy>free</uy>
+    </DisplacementBoundary>
+
+  </BoundaryConditions>
+
+  <Loads/>
+
+  <Analysis>
+    <Type>static</Type>
+    <Procedure>nonlinear</Procedure>
+    <LoadSteps>1</LoadSteps>
+    <Gravity enabled="false">
+      <gx>0.0</gx>
+      <gy>-9.81</gy>
+    </Gravity>
+  </Analysis>
+
+  <Solver>
+    <LinearSolver>direct</LinearSolver>
+
+    <NonlinearSolver>
+      <Method>NewtonRaphson</Method>
+      <MaxIterations>10</MaxIterations>
+      <ForceTolerance>1.0e-9</ForceTolerance>
+      <DisplacementTolerance>1.0e-9</DisplacementTolerance>
+
+      <LoadStepping type="fixed"/>
+    </NonlinearSolver>
+  </Solver>
+
+  <Stages>
+
+    <!-- Initial ground only. Embankment lifts do not yet exist. -->
+    <Stage id="0" name="K0 initial ground">
+      <Procedure>K0</Procedure>
+
+      <DeactivateRegions>
+        <Region name="timbunan_bawah"/>
+        <Region name="timbunan_atas"/>
+      </DeactivateRegions>
+
+      <Gravity enabled="true">
+        <gx>0.0</gx>
+        <gy>-9.81</gy>
+      </Gravity>
+
+      <K0>
+        <Region name="soil1" value="0.50"/>
+        <Region name="soil2" value="0.50"/>
+        <EquilibriumTolerance>1.0e-8</EquilibriumTolerance>
+      </K0>
+    </Stage>
+
+    <!-- Birth of the lower embankment lift. -->
+    <Stage id="1" name="Activate lower embankment">
+      <Procedure>nonlinear</Procedure>
+      <LoadSteps>1</LoadSteps>
+
+      <ActivateRegions>
+        <Region name="timbunan_bawah"/>
+      </ActivateRegions>
+    </Stage>
+
+    <!-- Birth of the upper embankment lift. -->
+    <Stage id="2" name="Activate upper embankment">
+      <Procedure>nonlinear</Procedure>
+      <LoadSteps>1</LoadSteps>
+
+      <ActivateRegions>
+        <Region name="timbunan_atas"/>
+      </ActivateRegions>
+    </Stage>
+
+  </Stages>
+
+  <Output>
+    <VTK enabled="true">
+      <Directory>results</Directory>
+      <BaseName>embankment_k0_activation_cumulative</BaseName>
+      <WriteGaussPoints>true</WriteGaussPoints>
+    </VTK>
+    <Matplotlib enabled="false"/>
+  </Output>
+
+</Problem>

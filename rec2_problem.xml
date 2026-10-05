@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Problem name="rec2" version="0.1">
+
+    <!-- =========================================================
+         GENERAL
+         ========================================================= -->
+    <General>
+        <!-- Unit system used by the whole problem -->
+        <Units>
+            <Length>m</Length>
+            <Force>N</Force>
+            <Time>s</Time>
+        </Units>
+
+        <!-- 2D formulation -->
+        <Dimension>2D</Dimension>
+        <Formulation>plane_strain</Formulation>
+    </General>
+
+
+    <!-- =========================================================
+         MESH
+         Element type and connectivity are read directly from Gmsh.
+         No need to specify Quad4 / Tri3 here.
+         ========================================================= -->
+    <Mesh>
+        <File>rec2.msh</File>
+        <Format>gmsh</Format>
+    </Mesh>
+
+
+    <!-- =========================================================
+         MATERIALS
+
+         The "region" attribute refers to a Gmsh Physical Surface.
+         The "model" attribute selects the constitutive model.
+
+         Examples of model names planned for the solver:
+             LinearElastic
+             MohrCoulomb
+             ModifiedCamClay
+             BarcelonaBasicModel
+         ========================================================= -->
+    <Materials>
+
+        <Material id="1"
+                  name="soil1"
+                  region="soil1"
+                  model="LinearElastic">
+
+            <!-- Parameters for Linear Elastic model -->
+            <Parameters>
+                <E>100000.0</E>
+                <nu>0.30</nu>
+                <density>1800.0</density>
+            </Parameters>
+
+        </Material>
+
+        <!--
+        EXAMPLE: MOHR-COULOMB
+
+        <Material id="1"
+                  name="soil1"
+                  region="soil1"
+                  model="MohrCoulomb">
+
+            <Parameters>
+                <E>100000.0</E>
+                <nu>0.30</nu>
+                <cohesion>10000.0</cohesion>
+                <friction_angle>30.0</friction_angle>
+                <dilatancy_angle>0.0</dilatancy_angle>
+                <density>1800.0</density>
+            </Parameters>
+
+        </Material>
+        -->
+
+
+        <!--
+        EXAMPLE: MODIFIED CAM CLAY
+
+        <Material id="1"
+                  name="soil1"
+                  region="soil1"
+                  model="ModifiedCamClay">
+
+            <Parameters>
+                <lambda>0.10</lambda>
+                <kappa>0.02</kappa>
+                <M>1.20</M>
+                <nu>0.30</nu>
+                <e0>0.80</e0>
+                <pc0>100000.0</pc0>
+                <density>1800.0</density>
+            </Parameters>
+
+        </Material>
+        -->
+
+
+        <!--
+        EXAMPLE: BARCELONA BASIC MODEL
+
+        <Material id="1"
+                  name="soil1"
+                  region="soil1"
+                  model="BarcelonaBasicModel">
+
+            <Parameters>
+                <lambda0>0.18</lambda0>
+                <kappa>0.065</kappa>
+                <M>1.20</M>
+                <pc0>100000.0</pc0>
+
+                <r>0.70</r>
+                <beta>0.02</beta>
+                <p_reference>2300.0</p_reference>
+
+                <suction0>50000.0</suction0>
+                <density>1800.0</density>
+            </Parameters>
+
+        </Material>
+        -->
+
+    </Materials>
+
+
+    <!-- =========================================================
+         BOUNDARY CONDITIONS
+
+         "group" refers to a Gmsh Physical Curve / Physical Point.
+
+         fixed = -1 internally
+         free  =  0 internally
+
+         The XML uses descriptive words rather than numerical flags.
+         The parser can convert:
+             fixed -> -1
+             free  ->  0
+         ========================================================= -->
+    <BoundaryConditions>
+
+        <DisplacementBoundary name="base_fix"
+                              group="bottomfix">
+            <ux>fixed</ux>
+            <uy>fixed</uy>
+        </DisplacementBoundary>
+
+    </BoundaryConditions>
+
+
+    <!-- =========================================================
+         LOADS
+
+         "load" is the Physical Curve defined in Gmsh.
+         For a boundary curve, traction is usually more natural
+         than manually assigning the same nodal force to every node.
+         ========================================================= -->
+    <Loads>
+
+        <BoundaryLoad name="top_load"
+                      group="load"
+                      type="traction">
+
+            <tx>0.0</tx>
+            <ty>1000.0</ty>
+
+            <!-- Currently constant.
+                 Can later be replaced by a time-dependent function. -->
+            <TimeFunction type="constant"/>
+
+        </BoundaryLoad>
+
+    </Loads>
+
+
+    <!-- =========================================================
+         ANALYSIS
+
+         Recommended separation:
+
+         type:
+             static
+             time_dependent       (future)
+
+         procedure:
+             linear
+             plastic
+
+         This allows, for example:
+             static + linear
+             static + plastic
+             time_dependent + plastic
+         ========================================================= -->
+    <Analysis>
+
+        <Type>static</Type>
+        <Procedure>linear</Procedure>
+
+        <!-- Gravity can be activated later -->
+        <Gravity enabled="false">
+            <gx>0.0</gx>
+            <gy>-9.81</gy>
+        </Gravity>
+
+        <!-- Future time-dependent analysis settings -->
+        <Time>
+            <Start>0.0</Start>
+            <End>1.0</End>
+            <TimeStep>0.1</TimeStep>
+        </Time>
+
+    </Analysis>
+
+
+    <!-- =========================================================
+         SOLVER SETTINGS
+         ========================================================= -->
+    <Solver>
+
+        <LinearSolver>direct</LinearSolver>
+
+        <!-- Used when nonlinear/plastic analysis is implemented -->
+        <NonlinearSolver>
+            <Method>NewtonRaphson</Method>
+            <MaxIterations>50</MaxIterations>
+            <Tolerance>1.0e-6</Tolerance>
+        </NonlinearSolver>
+
+    </Solver>
+
+
+    <!-- =========================================================
+         OUTPUT
+         ========================================================= -->
+    <Output>
+
+        <Directory>results</Directory>
+
+        <NodalResults>
+            <Displacement>true</Displacement>
+            <Reaction>true</Reaction>
+        </NodalResults>
+
+        <ElementResults>
+            <Stress>true</Stress>
+            <Strain>true</Strain>
+            <PlasticStrain>false</PlasticStrain>
+        </ElementResults>
+
+    </Output>
+
+
+    <!-- =========================================================
+         RESERVED / FUTURE EXTENSIONS
+
+         Possible additions without changing the basic architecture:
+
+         - InitialConditions
+         - InitialStress
+         - Groundwater
+         - PorePressure
+         - Suction
+         - HydraulicProperties
+         - SWCC
+         - Permeability
+         - Consolidation
+         - Rainfall
+         - CoupledHydroMechanical
+         - Dynamic analysis
+         - Multiple analysis stages/phases
+         - Load curves
+         - Restart/checkpoint
+         ========================================================= -->
+
+</Problem>

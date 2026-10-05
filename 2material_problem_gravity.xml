@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Problem name="2material_test" version="0.1">
+  <General>
+    <Units>
+      <Length>m</Length>
+      <Force>kN</Force>
+      <Time>s</Time>
+    </Units>
+    <Dimension>2D</Dimension>
+    <Formulation>plane_strain</Formulation>
+  </General>
+  <Mesh>
+    <File>2trimaterial.msh</File>
+    <Format>gmsh</Format>
+  </Mesh>
+  <Materials>
+    <Material id="1" name="upper_soil" region="soil1" model="LinearElastic">
+      <Parameters>
+        <!-- With Length=m and Force=kN: E is in kPa -->
+        <E>10000.0</E>
+        <nu>0.30</nu>
+        <!-- density is always kg/m^3 -->
+        <density>1800.0</density>
+      </Parameters>
+    </Material>
+    <Material id="2" name="lower_soil" region="soil2" model="LinearElastic">
+      <Parameters>
+        <!-- With Length=m and Force=kN: E is in kPa -->
+        <E>20000.0</E>
+        <nu>0.3</nu>
+        <!-- density is always kg/m^3 -->
+        <density>1900.0</density>
+      </Parameters>
+    </Material>
+  </Materials>
+  <BoundaryConditions>
+    <DisplacementBoundary name="base_fix" group="bottomfix">
+      <ux>fixed</ux>
+      <uy>fixed</uy>
+    </DisplacementBoundary>
+  </BoundaryConditions>
+  <Loads>
+    <BoundaryLoad name="top_load" group="load" type="traction">
+      <!-- With Length=m and Force=kN: traction is in kPa -->
+      <tx>0.0</tx>
+      <ty>0.0</ty>
+      <TimeFunction type="constant"/>
+    </BoundaryLoad>
+  </Loads>
+  <Analysis>
+    <Type>static</Type>
+    <Procedure>linear</Procedure>
+    <Gravity enabled="true">
+      <gx>0.0</gx>
+      <gy>-9.81</gy>
+    </Gravity>
+  </Analysis>
+  <Output>
+    <Displacement>uy</Displacement>
+    <DeformationScale>1.0</DeformationScale>
+  </Output>
+</Problem>
