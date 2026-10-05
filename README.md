@@ -175,6 +175,7 @@ As the project structure stabilizes, dedicated contribution guidelines and testi
 ## Author
 
 **Bagus E. Prasetyo**
+
 **Computational Geotechnics Research Initiative**  
 Department of Civil Engineering  
 Universitas Sembilanbelas November Kolaka, Indonesia
