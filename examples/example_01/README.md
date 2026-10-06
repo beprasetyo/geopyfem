@@ -416,7 +416,10 @@ example01/
 The example uses kPa for stress quantities:
 
 $$
-E=30000\ \text{kPa},\qquadq=-1000\ \text{kPa}.
+E=30000\ \text{kPa},
+$$
+$$
+\qquadq=-1000\ \text{kPa}.
 $$
 
 The current XML metadata contains:
