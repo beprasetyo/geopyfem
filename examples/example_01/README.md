@@ -18,15 +18,15 @@ The numerical result is compared with a simple analytical reference solution.
 
 ## Problem definition
 
-The model consists of a rectangular domain with width \(B=3\) m and height \(H=6\) m.
+The model consists of a rectangular domain with width $B=3$ m and height $H=6$ m.
 
 | Parameter | Value |
 |---|---:|
-| Width, \(B\) | 3 m |
-| Height, \(H\) | 6 m |
-| Young's modulus, \(E\) | 30,000 kPa |
-| Poisson's ratio, \($\nu$\) | 0.30 |
-| Top traction, \(q\) | -1,000 kPa |
+| Width, $B$ | 3 m |
+| Height, $H$ | 6 m |
+| Young's modulus, $E$ | 30,000 kPa |
+| Poisson's ratio, $\nu$ | 0.30 |
+| Top traction, $q$ | -1,000 kPa |
 | Formulation | Plane strain |
 | Analysis | Static, linear elastic |
 
@@ -72,9 +72,9 @@ Recombine Surface {1};
 
 This gives:
 
-- 4 elements in the \(x\)-direction,
-- 8 elements in the \(y\)-direction,
-- \($\Delta$ x=$\Delta$ y=0.75\) m,
+- 4 elements in the $x$-direction,
+- 8 elements in the $y$-direction,
+- $\Delta x=\Delta y=0.75$ m,
 - 32 four-node quadrilateral elements, and
 - 45 nodes.
 
@@ -234,11 +234,11 @@ The calculated vertical displacement field is shown below.
 
 ![Vertical displacement result for Example 01](example01_ydisplacement.png)
 
-*Figure 3. Deformed mesh and vertical displacement $\(u_y$\).* 
+*Figure 3. Deformed mesh and vertical displacement $u_y$.* 
 
 The response shows the expected behaviour:
 
-- $\(u_y=0$\) along the fixed base,
+- $u_y=0$ along the fixed base,
 - downward displacement increases with height,
 - displacement contours are approximately horizontal,
 - the response is symmetric about the vertical centreline, and
@@ -345,7 +345,7 @@ $$
 =-0.03033.
 $$
 
-For \(H=6\) m,
+For $H=6$ m,
 
 $$
 u_y=\varepsilon_y H,
@@ -363,7 +363,7 @@ $$
 \boxed{u_{y,\mathrm{top}}^{\mathrm{analytical}}\approx-0.182\ \text{m}}
 $$
 
-or approximately $\(-182$\) mm.
+or approximately $-182$ mm.
 
 ---
 
@@ -371,8 +371,8 @@ or approximately $\(-182$\) mm.
 
 | Solution | Top vertical displacement |
 |---|---:|
-| Analytical reference | $\(-0.1818$\) m |
-| GeoPyFEM | $\(\approx-0.18$\) m |
+| Analytical reference | $-0.1818$ m |
+| GeoPyFEM | $\approx-0.18$ m |
 
 Using the rounded value read from the plot, the relative difference is approximately
 
@@ -380,7 +380,7 @@ $$
 \frac{|0.1800-0.1818|}{0.1818}\times100\%\approx1.0\%.
 $$
 
-The analytical expression is intended as a **global verification reference**, not as an exact pointwise solution near the fixed base. The analytical derivation assumes \(\sigma_x\approx0\), whereas the fully fixed base locally restrains lateral deformation.
+The analytical expression is intended as a **global verification reference**, not as an exact pointwise solution near the fixed base. The analytical derivation assumes $\sigma_x\approx0$, whereas the fully fixed base locally restrains lateral deformation.
 
 The numerical displacement magnitude and overall displacement pattern nevertheless agree closely with the analytical reference.
 
@@ -395,7 +395,7 @@ u_y
 =-0.200\ \text{m}.
 $$
 
-The GeoPyFEM result of approximately $\(-0.18$\) m is therefore consistent with the intended plane-strain formulation.
+The GeoPyFEM result of approximately $-0.18$ m is therefore consistent with the intended plane-strain formulation.
 
 ---
 
@@ -405,11 +405,11 @@ This example is considered successful when:
 
 - the mesh contains 32 Quad4 elements and 45 nodes,
 - `soil1` is assigned the linear-elastic material,
-- `bottomfix` enforces $\(u_x=u_y=0$\),
-- `load` applies a uniform downward traction of $\(-1000$\) kPa,
+- `bottomfix` enforces $u_x=u_y=0$,
+- `load` applies a uniform downward traction of $-1000$ kPa,
 - vertical displacement is zero along the base,
-- $\(|u_y|$\) increases approximately with height,
-- the top vertical displacement is close to $\(-0.182$\) m, and
+- $|u_y|$ increases approximately with height,
+- the top vertical displacement is close to $-0.182$ m, and
 - the response is symmetric about the vertical centreline.
 
 ---
@@ -424,7 +424,7 @@ example01/
 ├── example01_problem_definition.png
 ├── example01_gmsh_mesh.png
 ├── example01_ydisplacement.png
-└── example01.md
+└── README.md
 ```
 
 | File | Description |
@@ -435,7 +435,7 @@ example01/
 | `example01_problem_definition.png` | Schematic of the benchmark problem |
 | `example01_gmsh_mesh.png` | Gmsh mesh illustration |
 | `example01_ydisplacement.png` | Vertical displacement result |
-| `example01.md` | Example documentation and validation |
+| `README.md` | Example documentation and validation |
 
 ---
 
