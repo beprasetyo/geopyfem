@@ -259,12 +259,7 @@ A simple analytical reference can be obtained for the nearly uniform stress stat
 For isotropic linear elasticity,
 
 $$
-\varepsilon_y
-=
-\frac{1}{E}
-\left[
-\sigma_y-\nu(\sigma_x+\sigma_z)
-\right].
+\varepsilon_y =\frac{1}{E}\left[\sigma_y-\nu(\sigma_x+\sigma_z)\right].
 $$
 
 For plane strain,
@@ -276,11 +271,7 @@ $$
 Therefore,
 
 $$
-0=
-\frac{1}{E}
-\left[
-\sigma_z-\nu(\sigma_x+\sigma_y)
-\right],
+0=\frac{1}{E}\left[\sigma_z-\nu(\sigma_x+\sigma_y)\right],
 $$
 
 which gives
@@ -304,45 +295,31 @@ $$
 Substituting into the vertical strain equation gives
 
 $$
-\varepsilon_y
-=
-\frac{\sigma_y}{E}(1-\nu^2).
+\varepsilon_y=\frac{\sigma_y}{E}(1-\nu^2).
 $$
 
 This can also be written using an effective vertical modulus,
 
 $$
-E_{\mathrm{eff}}
-=
-\frac{E}{1-\nu^2}.
+E_{\mathrm{eff}}=\frac{E}{1-\nu^2}.
 $$
 
 For
 
 $$
-E=30000\ \text{kPa},
-\qquad
-\nu=0.30,
-\qquad
-\sigma_y=-1000\ \text{kPa},
+E=30000\ \text{kPa},\qquad\nu=0.30,\qquad\sigma_y=-1000\ \text{kPa},
 $$
 
 we obtain
 
 $$
-E_{\mathrm{eff}}
-=
-\frac{30000}{1-0.3^2}
-=32967.03\ \text{kPa}.
+E_{\mathrm{eff}}=\frac{30000}{1-0.3^2}=32967.03\ \text{kPa}.
 $$
 
 The vertical strain is therefore
 
 $$
-\varepsilon_y
-=
-\frac{-1000}{32967.03}
-=-0.03033.
+\varepsilon_y=\frac{-1000}{32967.03}=-0.03033.
 $$
 
 For $H=6$ m,
@@ -387,12 +364,7 @@ The numerical displacement magnitude and overall displacement pattern neverthele
 For comparison, a simple uniaxial plane-stress calculation would give
 
 $$
-u_y
-=
-\frac{\sigma_y}{E}H
-=
-\frac{-1000}{30000}(6)
-=-0.200\ \text{m}.
+u_y=\frac{\sigma_y}{E}H=\frac{-1000}{30000}(6)=-0.200\ \text{m}.
 $$
 
 The GeoPyFEM result of approximately $-0.18$ m is therefore consistent with the intended plane-strain formulation.
@@ -444,9 +416,7 @@ example01/
 The example uses kPa for stress quantities:
 
 $$
-E=30000\ \text{kPa},
-\qquad
-q=-1000\ \text{kPa}.
+E=30000\ \text{kPa},\qquadq=-1000\ \text{kPa}.
 $$
 
 The current XML metadata contains:
