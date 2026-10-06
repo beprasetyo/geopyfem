@@ -25,22 +25,22 @@ The model consists of a rectangular domain with width \(B=3\) m and height \(H=6
 | Width, \(B\) | 3 m |
 | Height, \(H\) | 6 m |
 | Young's modulus, \(E\) | 30,000 kPa |
-| Poisson's ratio, \(\nu\) | 0.30 |
+| Poisson's ratio, \($\nu$\) | 0.30 |
 | Top traction, \(q\) | -1,000 kPa |
 | Formulation | Plane strain |
 | Analysis | Static, linear elastic |
 
 The bottom boundary is fully fixed,
 
-\[
+$$
 u_x=0, \qquad u_y=0,
-\]
+$$
 
 while the left and right boundaries are free. A uniform vertical compressive traction is applied along the top boundary,
 
-\[
+$$
 t_x=0, \qquad t_y=-1000\ \text{kPa}.
-\]
+$$
 
 A negative value denotes compression in the vertical direction.
 
@@ -74,7 +74,7 @@ This gives:
 
 - 4 elements in the \(x\)-direction,
 - 8 elements in the \(y\)-direction,
-- \(\Delta x=\Delta y=0.75\) m,
+- \($\Delta$ x=$\Delta$ y=0.75\) m,
 - 32 four-node quadrilateral elements, and
 - 45 nodes.
 
@@ -148,9 +148,9 @@ The `soil1` region uses the linear-elastic constitutive model:
 
 Hence,
 
-\[
+$$
 E=30000\ \text{kPa}, \qquad \nu=0.30.
-\]
+$$
 
 ### Boundary condition
 
@@ -166,9 +166,9 @@ The base is fixed in both directions:
 
 so that
 
-\[
+$$
 u_x=u_y=0 \qquad \text{at } y=0.
-\]
+$$
 
 ### Applied load
 
@@ -234,19 +234,19 @@ The calculated vertical displacement field is shown below.
 
 ![Vertical displacement result for Example 01](example01_ydisplacement.png)
 
-*Figure 3. Deformed mesh and vertical displacement \(u_y\).* 
+*Figure 3. Deformed mesh and vertical displacement $\(u_y$\).* 
 
 The response shows the expected behaviour:
 
-- \(u_y=0\) along the fixed base,
+- $\(u_y=0$\) along the fixed base,
 - downward displacement increases with height,
 - displacement contours are approximately horizontal,
 - the response is symmetric about the vertical centreline, and
 - the maximum vertical displacement at the top is approximately
 
-\[
+$$
 u_{y,\mathrm{top}}^{\mathrm{FEM}}\approx-0.18\ \text{m}.
-\]
+$$
 
 Because the complete bottom boundary is fixed in both directions, a local two-dimensional boundary effect is expected near the base, where lateral Poisson deformation is restrained.
 
@@ -258,112 +258,112 @@ A simple analytical reference can be obtained for the nearly uniform stress stat
 
 For isotropic linear elasticity,
 
-\[
+$$
 \varepsilon_y
 =
 \frac{1}{E}
 \left[
 \sigma_y-\nu(\sigma_x+\sigma_z)
 \right].
-\]
+$$
 
 For plane strain,
 
-\[
+$$
 \varepsilon_z=0.
-\]
+$$
 
 Therefore,
 
-\[
+$$
 0=
 \frac{1}{E}
 \left[
 \sigma_z-\nu(\sigma_x+\sigma_y)
 \right],
-\]
+$$
 
 which gives
 
-\[
+$$
 \sigma_z=\nu(\sigma_x+\sigma_y).
-\]
+$$
 
 Away from the fixed base, the vertical sides are traction-free, so the in-plane horizontal stress may be approximated as
 
-\[
+$$
 \sigma_x\approx0.
-\]
+$$
 
 Hence,
 
-\[
+$$
 \sigma_z=\nu\sigma_y.
-\]
+$$
 
 Substituting into the vertical strain equation gives
 
-\[
+$$
 \varepsilon_y
 =
 \frac{\sigma_y}{E}(1-\nu^2).
-\]
+$$
 
 This can also be written using an effective vertical modulus,
 
-\[
+$$
 E_{\mathrm{eff}}
 =
 \frac{E}{1-\nu^2}.
-\]
+$$
 
 For
 
-\[
+$$
 E=30000\ \text{kPa},
 \qquad
 \nu=0.30,
 \qquad
 \sigma_y=-1000\ \text{kPa},
-\]
+$$
 
 we obtain
 
-\[
+$$
 E_{\mathrm{eff}}
 =
 \frac{30000}{1-0.3^2}
 =32967.03\ \text{kPa}.
-\]
+$$
 
 The vertical strain is therefore
 
-\[
+$$
 \varepsilon_y
 =
 \frac{-1000}{32967.03}
 =-0.03033.
-\]
+$$
 
 For \(H=6\) m,
 
-\[
+$$
 u_y=\varepsilon_y H,
-\]
+$$
 
 and therefore
 
-\[
+$$
 u_y=(-0.03033)(6)=-0.1818\ \text{m}.
-\]
+$$
 
 The analytical reference displacement is thus
 
-\[
+$$
 \boxed{u_{y,\mathrm{top}}^{\mathrm{analytical}}\approx-0.182\ \text{m}}
-\]
+$$
 
-or approximately \(-182\) mm.
+or approximately $\(-182$\) mm.
 
 ---
 
@@ -371,14 +371,14 @@ or approximately \(-182\) mm.
 
 | Solution | Top vertical displacement |
 |---|---:|
-| Analytical reference | \(-0.1818\) m |
-| GeoPyFEM | \(\approx-0.18\) m |
+| Analytical reference | $\(-0.1818$\) m |
+| GeoPyFEM | $\(\approx-0.18$\) m |
 
 Using the rounded value read from the plot, the relative difference is approximately
 
-\[
+$$
 \frac{|0.1800-0.1818|}{0.1818}\times100\%\approx1.0\%.
-\]
+$$
 
 The analytical expression is intended as a **global verification reference**, not as an exact pointwise solution near the fixed base. The analytical derivation assumes \(\sigma_x\approx0\), whereas the fully fixed base locally restrains lateral deformation.
 
@@ -386,16 +386,16 @@ The numerical displacement magnitude and overall displacement pattern neverthele
 
 For comparison, a simple uniaxial plane-stress calculation would give
 
-\[
+$$
 u_y
 =
 \frac{\sigma_y}{E}H
 =
 \frac{-1000}{30000}(6)
 =-0.200\ \text{m}.
-\]
+$$
 
-The GeoPyFEM result of approximately \(-0.18\) m is therefore consistent with the intended plane-strain formulation.
+The GeoPyFEM result of approximately $\(-0.18$\) m is therefore consistent with the intended plane-strain formulation.
 
 ---
 
@@ -405,11 +405,11 @@ This example is considered successful when:
 
 - the mesh contains 32 Quad4 elements and 45 nodes,
 - `soil1` is assigned the linear-elastic material,
-- `bottomfix` enforces \(u_x=u_y=0\),
-- `load` applies a uniform downward traction of \(-1000\) kPa,
+- `bottomfix` enforces $\(u_x=u_y=0$\),
+- `load` applies a uniform downward traction of $\(-1000$\) kPa,
 - vertical displacement is zero along the base,
-- \(|u_y|\) increases approximately with height,
-- the top vertical displacement is close to \(-0.182\) m, and
+- $\(|u_y|$\) increases approximately with height,
+- the top vertical displacement is close to $\(-0.182$\) m, and
 - the response is symmetric about the vertical centreline.
 
 ---
@@ -443,11 +443,11 @@ example01/
 
 The example uses kPa for stress quantities:
 
-\[
+$$
 E=30000\ \text{kPa},
 \qquad
 q=-1000\ \text{kPa}.
-\]
+$$
 
 The current XML metadata contains:
 
@@ -461,9 +461,9 @@ If the `<Units>` block is currently descriptive only and GeoPyFEM does not perfo
 
 If automatic unit conversion is introduced later, the metadata should be made consistent with the intended stress unit. With length in metres, using force in **kN** gives
 
-\[
+$$
 1\ \text{kN/m}^2=1\ \text{kPa}.
-\]
+$$
 
 ---
 
@@ -471,14 +471,14 @@ If automatic unit conversion is introduced later, the metadata should be made co
 
 Example 01 verifies the basic linear-elastic GeoPyFEM workflow from Gmsh mesh import through post-processing. The calculated maximum vertical displacement is approximately
 
-\[
+$$
 \boxed{u_y\approx-0.18\ \text{m}},
-\]
+$$
 
 which is in close agreement with the analytical reference value
 
-\[
+$$
 \boxed{u_y\approx-0.182\ \text{m}}.
-\]
+$$
 
 This benchmark therefore provides a simple check of mesh import, material assignment, boundary conditions, traction loading, plane-strain elasticity, the linear solver, and displacement post-processing.
