@@ -67,7 +67,7 @@ Keep the mesh alongside the XML file when using GeoPyFEM's usual example-folder 
    The XML input should refer to `excav_tri6.msh`. Both files are in `examples/example02/`.
    If your GeoPyFEM version resolves mesh paths relative to the working directory rather than the XML location, adjust the mesh path or working directory accordingly.
 
-4. Inspect the terminal output to check that all stages converge. Do not assume convergence merely because the program started.
+4. Inspect the terminal output to check that all stages converge. 
 
 ## Analysis sequence
 
@@ -95,7 +95,7 @@ The XML enables VTK output:
 </Output>
 ```
 
-After the run, locate the `results` directory produced by GeoPyFEM and open the stage VTK files in **VisIt** or **ParaView**. Inspect the displacement field, stress distribution, and remaining active elements after each excavation stage. In VisIt, an element-activity threshold can be used to hide excavated cells **if the VTK file contains an activity variable**.
+After the run, locate the `results` directory produced by GeoPyFEM and open the stage VTK files in **VisIt** or **ParaView**. Inspect the displacement field, stress distribution, and remaining active elements after each excavation stage. In VisIt, an element-activity threshold can be used to hide excavated cells.
 
 For validation, confirm that both excavation regions initially exist, `excav_soil4` is absent after Stage 2, and `excav_soil3` is also absent after Stage 3. Inspect residual/convergence messages to confirm that the holding-force release stages converge.
 
@@ -107,9 +107,7 @@ The following screenshot shows the **displacement magnitude** (`U_magnitude`) vi
 
 *Figure 2. VisIt pseudocolor visualization of the GeoPyFEM displacement magnitude (`U_magnitude`) on the excavated mesh. The screenshot reports a maximum of approximately **0.01613 m (16.13 mm)**.*
 
-The largest displacements are concentrated near the **upper-right part of the slope**, around the surface-loaded region, while smaller displacements appear in the deeper soil and toward the left boundary. The displayed variable is the **magnitude of displacement**, not the displacement direction. A pseudocolor result alone does not establish whether a geometric deformation scale was applied in VisIt.
-
-This figure is a **visual result**, not a standalone numerical validation of the excavation algorithm. Quantitative validation additionally requires convergence checks and, ideally, comparison of nodal displacements or stress changes between analysis stages and against an independent solution.
+The largest displacements are concentrated near the **upper-right part of the slope**, around the surface-loaded region, while smaller displacements appear in the deeper soil and toward the left boundary. The displayed variable is the **magnitude of displacement**, not the displacement direction.
 
 ### Benchmark comparison with PLAXIS
 
@@ -117,7 +115,7 @@ For an independent reference, the same staged-excavation example has also been a
 
 ![PLAXIS 2D total displacement magnitude for the excavated slope](Plaxis_result.png)
 
-*Figure 3. PLAXIS 2D reference result for the excavated slope, showing total displacement magnitude |u|. The reported maximum displacement is 0.01613 m (16.13 mm), with the displayed deformation scaled by 20.0×.*
+*Figure 3. PLAXIS 2D reference result for the excavated slope, showing total displacement magnitude |u|. The reported maximum displacement is 0.01613 m (16.13 mm).*
 
 #### Maximum-displacement comparison
 
@@ -130,7 +128,5 @@ For an independent reference, the same staged-excavation example has also been a
 
 
 The maximum displacement reported by GeoPyFEM **matches the PLAXIS value at the precision shown in the screenshots**. Both displacement plots also show the larger displacement zone near the top-right loaded area and smaller magnitudes toward the lower-left region of the remaining ground. This provides encouraging **benchmark agreement for the final-stage maximum displacement and the broad displacement pattern**.
-
-**Scope of validation.** The two pictures alone cannot establish full numerical equivalence. In particular, the same-looking maximum values do not quantify node-by-node error, and the graphics may use different contour ranges or deformation display scales. Stronger validation would compare corresponding horizontal/vertical displacement components (`u_x`, `u_y`) at selected coordinates, stresses, and results after each stage; it would also verify that both models use equivalent material properties, groundwater elevation, boundary conditions, and excavation/load histories. These additional comparisons are not documented in the provided screenshots.
 
 The XML's material densities correspond approximately to unit weights **19, 18, and 17 kN/m³**, using `γ = ρg / 1000` with `g = 9.81 m/s²`.

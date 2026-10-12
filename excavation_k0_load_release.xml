@@ -74,7 +74,7 @@
 
   <Groundwater enabled="true" name="initial_gwt" type="horizontal">
     <UnitWeightWater>10</UnitWeightWater>
-    <Elevation>2.0</Elevation>
+    <Elevation>1.0</Elevation>
   </Groundwater>
 
   <BoundaryConditions>
