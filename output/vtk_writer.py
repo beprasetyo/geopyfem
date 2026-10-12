@@ -118,6 +118,9 @@ def write_vtk_results(
         gauss_states=solution.get(
             "gauss_states"
         ),
+        active_element_ids=solution.get(
+            "active_element_ids"
+        ),
     )
 
     mesh_path = output_directory / (
@@ -177,48 +180,55 @@ def _write_mesh_vtu(
     """
     Write the original FEM unstructured grid.
     """
-    npoint = len(nodes)
+    # Recover stress/strain only from ACTIVE cells. The original FEM node
+    # indices and DOFs are never altered. On VTK output only, duplicate a node
+    # at a material (or activation) interface, so PointData cannot smear a
+    # constitutive discontinuity across two distinct materials.
     ncell = len(mesh_elements)
+    cell_results = result_database["cell_results"]
+    if len(cell_results) != ncell:
+        raise ValueError("Cell-result count does not match mesh cell count.")
 
-    points = np.zeros((
-        npoint,
-        3,
-    ))
+    if active_element_ids is None:
+        active_element_set = {int(item["element_id"]) for item in cell_results}
+    else:
+        active_element_set = {int(i) for i in active_element_ids}
 
-    points[:, :2] = nodes
-
+    vtk_node_keys = []  # (original node ID, material region, is_active_cell)
+    vtk_point_indices = {}
     connectivity = []
     offsets = []
     cell_types = []
-
     current_offset = 0
 
-    for element in mesh_elements:
+    for element, cell in zip(mesh_elements, cell_results):
         element_type = element["type"]
-
         if element_type not in VTK_CELL_TYPES:
             raise NotImplementedError(
-                f'VTK writer does not yet support '
-                f'element type "{element_type}".'
+                f'VTK writer does not yet support element type "{element_type}".'
             )
+        region = cell["material_region"]
+        is_active = int(cell["element_id"]) in active_element_set
+        for node_id in element["connectivity"]:
+            key = (int(node_id), region, is_active)
+            if key not in vtk_point_indices:
+                vtk_point_indices[key] = len(vtk_node_keys)
+                vtk_node_keys.append(key)
+            connectivity.append(vtk_point_indices[key])
+        current_offset += len(element["connectivity"])
+        offsets.append(current_offset)
+        cell_types.append(VTK_CELL_TYPES[element_type])
 
-        c = element["connectivity"]
+    # Preserve isolated original mesh nodes in the output for completeness.
+    covered_node_ids = {key[0] for key in vtk_node_keys}
+    for original_node_id in range(len(nodes)):
+        if original_node_id not in covered_node_ids:
+            vtk_node_keys.append((original_node_id, None, False))
 
-        connectivity.extend(
-            int(node_id)
-            for node_id in c
-        )
-
-        current_offset += len(c)
-        offsets.append(
-            current_offset
-        )
-
-        cell_types.append(
-            VTK_CELL_TYPES[
-                element_type
-            ]
-        )
+    original_node_ids = np.asarray([key[0] for key in vtk_node_keys], dtype=int)
+    npoint = len(vtk_node_keys)
+    points = np.zeros((npoint, 3), dtype=float)
+    points[:, :2] = np.asarray(nodes, dtype=float)[original_node_ids, :2]
 
     point_results = result_database[
         "point_results"
@@ -228,38 +238,14 @@ def _write_mesh_vtu(
         "cell_results"
     ]
 
-    if len(cell_results) != ncell:
-        raise ValueError(
-            "Cell-result count does not match mesh cell count."
-        )
-
     element_ids = np.asarray([
-        item["element_id"]
-        for item in cell_results
+        item["element_id"] for item in cell_results
     ], dtype=int)
 
     material_ids = np.asarray([
-        _material_id(
-            item["material_region"],
-            materials_by_region,
-        )
+        _material_id(item["material_region"], materials_by_region)
         for item in cell_results
     ], dtype=int)
-
-    if active_element_ids is None:
-        active_element_set = set(
-            int(
-                item["element_id"]
-            )
-            for item in cell_results
-        )
-    else:
-        active_element_set = {
-            int(
-                element_id
-            )
-            for element_id in active_element_ids
-        }
 
     element_active = np.asarray([
         int(
@@ -272,27 +258,13 @@ def _write_mesh_vtu(
     ], dtype=int)
 
     if active_node_ids is None:
-        node_active = np.ones(
-            npoint,
-            dtype=int,
-        )
+        active_node_set = set(range(len(nodes)))
     else:
-        active_node_set = {
-            int(
-                node_id
-            )
-            for node_id in active_node_ids
-        }
-
-        node_active = np.asarray([
-            int(
-                node_id
-                in active_node_set
-            )
-            for node_id in range(
-                npoint
-            )
-        ], dtype=int)
+        active_node_set = {int(i) for i in active_node_ids}
+    node_active = np.asarray([
+        int(is_active and node_id in active_node_set)
+        for node_id, _region, is_active in vtk_node_keys
+    ], dtype=int)
 
     strain = np.asarray([
         item["strain"]
@@ -391,20 +363,20 @@ def _write_mesh_vtu(
     _add_data_array(
         point_data,
         "U",
-        point_results["U"],
+        point_results["U"][original_node_ids],
         number_of_components=3,
     )
 
     _add_data_array(
         point_data,
         "ux",
-        point_results["ux"],
+        point_results["ux"][original_node_ids],
     )
 
     _add_data_array(
         point_data,
         "uy",
-        point_results["uy"],
+        point_results["uy"][original_node_ids],
     )
 
     _add_data_array(
@@ -412,7 +384,7 @@ def _write_mesh_vtu(
         "U_magnitude",
         point_results[
             "U_magnitude"
-        ],
+        ][original_node_ids],
     )
 
     _add_data_array(
@@ -421,6 +393,72 @@ def _write_mesh_vtu(
         node_active,
         vtk_type="Int64",
     )
+
+    # Original FEM node index enables cross-checks against solver DOFs.
+    _add_data_array(
+        point_data, "original_node_id", original_node_ids, vtk_type="Int64"
+    )
+
+    # Material-specific, active-element-only recovered results. Keep every
+    # original CellData field and the separate exact *_gauss.vtu unchanged.
+    recovered = result_database.get("recovered_nodal", {})
+    nodal_valid = np.asarray([
+        int(is_active and (node_id, region) in recovered)
+        for node_id, region, is_active in vtk_node_keys
+    ], dtype=int)
+    _add_data_array(
+        point_data, "nodal_recovery_valid", nodal_valid, vtk_type="Int64"
+    )
+
+    def recovered_array(field, shape=()):
+        values = []
+        for node_id, region, is_active in vtk_node_keys:
+            if is_active and (node_id, region) in recovered:
+                values.append(np.asarray(recovered[(node_id, region)][field], dtype=float))
+            else:
+                values.append(np.zeros(shape, dtype=float))
+        return np.asarray(values, dtype=float).reshape((npoint,) + shape)
+
+    strain_n = recovered_array("strain", (3,))
+    strain_tensor_n = recovered_array("strain_tensor", (3, 3))
+    stress_n = recovered_array("stress_tensor", (3, 3))
+    effective_n = recovered_array("effective_stress_tensor", (3, 3))
+    plastic_n = recovered_array("plastic_strain_tensor", (3, 3))
+    pore_n = recovered_array("pore_pressure")
+    eq_plastic_n = recovered_array("equivalent_plastic_strain")
+
+    # Eigenvalues of recovered tensors, rather than recovery of eigenvalues.
+    principal_n = np.linalg.eigvalsh(stress_n)[:, ::-1]
+    effective_principal_n = np.linalg.eigvalsh(effective_n)[:, ::-1]
+
+    _add_data_array(point_data, "Strain_nodal", strain_tensor_n.reshape(npoint, 9),
+                    number_of_components=9)
+    _add_data_array(point_data, "epsilon_xx_nodal", strain_n[:, 0])
+    _add_data_array(point_data, "epsilon_yy_nodal", strain_n[:, 1])
+    _add_data_array(point_data, "gamma_xy_nodal", strain_n[:, 2])
+
+    _add_data_array(point_data, "Stress_nodal", stress_n.reshape(npoint, 9),
+                    number_of_components=9)
+    _add_data_array(point_data, "sigma_xx_nodal", stress_n[:, 0, 0])
+    _add_data_array(point_data, "tau_xy_nodal", stress_n[:, 0, 1])
+    _add_data_array(point_data, "sigma_yy_nodal", stress_n[:, 1, 1])
+    _add_data_array(point_data, "sigma_zz_nodal", stress_n[:, 2, 2])
+    for i, name in enumerate(("sigma1_nodal", "sigma2_nodal", "sigma3_nodal")):
+        _add_data_array(point_data, name, principal_n[:, i])
+
+    _add_data_array(point_data, "EffectiveStress_nodal", effective_n.reshape(npoint, 9),
+                    number_of_components=9)
+    _add_data_array(point_data, "sigma_eff_xx_nodal", effective_n[:, 0, 0])
+    _add_data_array(point_data, "tau_eff_xy_nodal", effective_n[:, 0, 1])
+    _add_data_array(point_data, "sigma_eff_yy_nodal", effective_n[:, 1, 1])
+    _add_data_array(point_data, "sigma_eff_zz_nodal", effective_n[:, 2, 2])
+    for i, name in enumerate(("sigma_eff_1_nodal", "sigma_eff_2_nodal", "sigma_eff_3_nodal")):
+        _add_data_array(point_data, name, effective_principal_n[:, i])
+
+    _add_data_array(point_data, "PlasticStrain_nodal", plastic_n.reshape(npoint, 9),
+                    number_of_components=9)
+    _add_data_array(point_data, "equivalent_plastic_strain_nodal", eq_plastic_n)
+    _add_data_array(point_data, "pore_pressure_nodal", pore_n)
 
     cell_data = ET.SubElement(
         piece,

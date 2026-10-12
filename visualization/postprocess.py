@@ -851,6 +851,7 @@ def build_result_database(
     u,
     material_models,
     gauss_states=None,
+    active_element_ids=None,
 ):
     """
     Build the result database used by GeoPyFEM output writers.
@@ -920,11 +921,187 @@ def build_result_database(
         ]
     ]
 
+    recovered_results = recover_nodal_results(
+        nodes=nodes,
+        element_results=element_results,
+        active_element_ids=active_element_ids,
+    )
+
     return {
         "point_results": point_results,
         "cell_results": cell_results,
         "gauss_results": gauss_results,
+        "recovered_nodal": recovered_results,
     }
+
+
+# =============================================================================
+# GAUSS-POINT -> NODAL RECOVERY (VISUALIZATION ONLY)
+# =============================================================================
+# Original committed Gauss-point values and integration-weighted CellData
+# remain authoritative. These fields are only for smoother VTK contours.
+# Recovery is assembled separately for each MATERIAL and from ACTIVE elements
+# only. vtk_writer.py splits shared visualization nodes at material interfaces,
+# avoiding artificial averaging across different constitutive materials.
+
+
+_RECOVER_FIELDS = (
+    "strain",
+    "strain_tensor",
+    "stress_tensor",
+    "effective_stress_tensor",
+    "plastic_strain_tensor",
+    "equivalent_plastic_strain",
+    "pore_pressure",
+)
+
+
+def _recover_element_at_nodes(nodes, element_result):
+    """Weighted linear least-squares extrapolation from GPs to element nodes.
+
+    The basis [1,x,y] is sufficient to reproduce linear fields exactly for
+    Tri6's standard three Gauss points. It also supports Quad4. If an element
+    has too few independent GPs, fall back to its weighted GP mean.
+    """
+    connectivity = np.asarray(element_result["connectivity"], dtype=int)
+    element_xy = np.asarray(nodes, dtype=float)[connectivity, :2]
+    gps = element_result["gauss_points"]
+    gp_xy = np.asarray([gp["position"][:2] for gp in gps], dtype=float)
+    weights = np.asarray([gp["integration_weight"] for gp in gps], dtype=float)
+    if len(gps) == 0 or np.any(weights <= 0) or not np.all(np.isfinite(weights)):
+        raise ValueError("Nodal recovery requires positive Gauss integration weights.")
+
+    origin = gp_xy.mean(axis=0)
+    scale = max(float(np.max(np.ptp(element_xy, axis=0))), 1.0e-12)
+    A = np.column_stack((np.ones(len(gps)), (gp_xy - origin) / scale))
+    A_nodes = np.column_stack((
+        np.ones(len(connectivity)), (element_xy - origin) / scale,
+    ))
+    sw = np.sqrt(weights / weights.sum())
+    Aw = A * sw[:, None]
+    use_linear = (
+        len(gps) >= 3
+        and np.linalg.matrix_rank(Aw, tol=1.0e-11) == 3
+        and np.linalg.cond(Aw) < 1.0e8
+    )
+
+    # Solve all scalar/tensor components in one least-squares operation.
+    # This is substantially faster than one solve per output field.
+    shapes = {}
+    field_columns = {}
+    for field in _RECOVER_FIELDS:
+        data = np.asarray([gp[field] for gp in gps], dtype=float)
+        shapes[field] = data.shape[1:]
+        field_columns[field] = data.reshape(len(gps), -1)
+    all_values = np.column_stack([field_columns[f] for f in _RECOVER_FIELDS])
+    if use_linear:
+        coefficients = np.linalg.lstsq(Aw, all_values * sw[:, None], rcond=None)[0]
+        recovered_columns = A_nodes @ coefficients
+    else:
+        mean = np.average(all_values, axis=0, weights=weights)
+        recovered_columns = np.broadcast_to(
+            mean, (len(connectivity), len(mean))
+        ).copy()
+
+    recovered = {}
+    col_start = 0
+    for field in _RECOVER_FIELDS:
+        width = field_columns[field].shape[1]
+        recovered[field] = recovered_columns[:, col_start:col_start + width].reshape(
+            (len(connectivity),) + shapes[field]
+        )
+        col_start += width
+    return recovered, float(weights.sum())
+
+
+def _identify_hydrostatic_gp_field(element_results, active_element_set):
+    """Detect (without assuming an XML water level) u=max(a+b*y,0).
+
+    Replacing the recovered pressure with this exact shape is only allowed if
+    ALL active GP values match the candidate to tight numerical tolerance.
+    Otherwise nodal pore pressure is recovered by the general method above.
+    This never changes the committed GP state or effective-stress computation.
+    """
+    y_values = []
+    pressures = []
+    for item in element_results:
+        if active_element_set is not None and int(item["element_id"]) not in active_element_set:
+            continue
+        for gp in item["gauss_points"]:
+            y_values.append(float(gp["position"][1]))
+            pressures.append(float(gp["pore_pressure"]))
+
+    if not pressures:
+        return None
+    y = np.asarray(y_values)
+    u = np.asarray(pressures)
+    if not np.all(np.isfinite(u)) or np.min(u) < -1.0e-12:
+        return None
+    if np.max(u) <= 1.0e-12:
+        return (0.0, 0.0)
+
+    wet = u > max(1.0e-10, 1.0e-9 * float(np.max(u)))
+    if wet.sum() < 3 or np.ptp(y[wet]) <= 1.0e-10:
+        return None
+    A = np.column_stack((np.ones(wet.sum()), y[wet]))
+    intercept, slope = np.linalg.lstsq(A, u[wet], rcond=None)[0]
+    if slope >= -1.0e-12:
+        return None
+    predicted = np.maximum(intercept + slope * y, 0.0)
+    tolerance = max(1.0e-8, float(np.max(u)) * 1.0e-6)
+    if np.max(np.abs(predicted - u)) <= tolerance:
+        return (float(intercept), float(slope))
+    return None
+
+
+def recover_nodal_results(nodes, element_results, active_element_ids=None):
+    """Recover nodal material fields, keyed by (original_node_id, material).
+
+    Each element contributes an area-weighted extrapolation to its nodes.
+    Deactivated elements are excluded to avoid contamination by excavated soil.
+    At material interfaces, values remain distinct; the VTK writer creates
+    separate coincident display nodes for each material/activation status.
+    """
+    active_set = (
+        None if active_element_ids is None
+        else {int(element_id) for element_id in active_element_ids}
+    )
+    sums = {}
+    weight_sums = {}
+    for element in element_results:
+        if active_set is not None and int(element["element_id"]) not in active_set:
+            continue
+        recovered, area = _recover_element_at_nodes(nodes, element)
+        material = element["material_region"]
+        for local, node_id in enumerate(element["connectivity"]):
+            key = (int(node_id), material)
+            if key not in sums:
+                sums[key] = {
+                    field: np.zeros_like(values[local], dtype=float)
+                    for field, values in recovered.items()
+                }
+                weight_sums[key] = 0.0
+            for field, values in recovered.items():
+                sums[key][field] += area * values[local]
+            weight_sums[key] += area
+
+    result = {
+        key: {field: values / weight_sums[key] for field, values in data.items()}
+        for key, data in sums.items()
+    }
+
+    # Hydrostatic pressure is piecewise linear in y: general GP extrapolation
+    # can overshoot at the water table. When the GP state is demonstrably
+    # hydrostatic, evaluate that SAME state exactly on the output nodes.
+    hydrostatic = _identify_hydrostatic_gp_field(element_results, active_set)
+    if hydrostatic is not None:
+        intercept, slope = hydrostatic
+        node_array = np.asarray(nodes, dtype=float)
+        for (node_id, _material), data in result.items():
+            data["pore_pressure"] = np.asarray(
+                max(intercept + slope * node_array[node_id, 1], 0.0)
+            )
+    return result
 
 
 # =============================================================================
