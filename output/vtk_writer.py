@@ -428,8 +428,16 @@ def _write_mesh_vtu(
     eq_plastic_n = recovered_array("equivalent_plastic_strain")
 
     # Eigenvalues of recovered tensors, rather than recovery of eigenvalues.
-    principal_n = np.linalg.eigvalsh(stress_n)[:, ::-1]
-    effective_principal_n = np.linalg.eigvalsh(effective_n)[:, ::-1]
+    #
+    # GeoPyFEM uses tension-positive stress, while the user-facing geotechnical /
+    # PLAXIS-style principal-stress ordering is:
+    #
+    #     sigma1 <= sigma2 <= sigma3
+    #
+    # np.linalg.eigvalsh() already returns ascending algebraic eigenvalues,
+    # so no reversal is required here.
+    principal_n = np.linalg.eigvalsh(stress_n)
+    effective_principal_n = np.linalg.eigvalsh(effective_n)
 
     _add_data_array(point_data, "Strain_nodal", strain_tensor_n.reshape(npoint, 9),
                     number_of_components=9)

@@ -1,5 +1,6 @@
 from material_model.linear_elastic import LinearElastic
 from material_model.von_mises import VonMises
+from material_model.mohr_coulomb import MohrCoulomb
 
 
 # =============================================================================
@@ -26,9 +27,9 @@ from material_model.von_mises import VonMises
 MATERIAL_MODELS = {
     "LinearElastic": LinearElastic,
     "VonMises": VonMises,
+    "MohrCoulomb": MohrCoulomb,
 
     # Future:
-    # "MohrCoulomb": MohrCoulomb,
     # "ModifiedCamClay": ModifiedCamClay,
     # "BarcelonaBasicModel": BarcelonaBasicModel,
 }
