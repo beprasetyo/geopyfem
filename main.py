@@ -11,9 +11,31 @@ from mesh_checker import check_and_normalize_mesh
 from material_model.materialtype import build_material_models
 from solver import solve_problem
 from output.vtk_writer import write_vtk_results
+from output.run_logger import start_run_logger
 from visualization.postprocess import (
     plot_displacement,
     print_element_gauss_results,
+)
+
+
+# =============================================================================
+# COMMAND-LINE INPUT + AUTOMATIC RUN LOG
+# =============================================================================
+
+if len(sys.argv) != 2:
+    print("Usage: python3 main.py problem.xml")
+    raise SystemExit(1)
+
+problem_file = sys.argv[1]
+
+# Start the log BEFORE normal preprocessing so nearly all console output,
+# warnings, solver traces, and any unhandled Python traceback are mirrored
+# automatically into a timestamped .log file.
+#
+# By default the log is written to the same output directory used by the VTK
+# section of the XML (normally <xml-directory>/results).
+run_logger = start_run_logger(
+    problem_file=problem_file,
 )
 
 
@@ -33,16 +55,16 @@ print(
     ),
 )
 
+if run_logger is not None:
+    print(
+        "Run log:",
+        run_logger.path,
+    )
+
 
 # =============================================================================
 # PRE-PROCESSING
 # =============================================================================
-
-if len(sys.argv) != 2:
-    print("Usage: python3 main.py problem.xml")
-    raise SystemExit(1)
-
-problem_file = sys.argv[1]
 
 print("read problem specification")
 
@@ -686,3 +708,9 @@ print(
     f"{program_elapsed_time:.3f} s",
 )
 print("=" * 118)
+
+
+# Mark a normal successful end.  The logger itself is closed automatically
+# through atexit, so an unhandled exception is also captured before shutdown.
+if run_logger is not None:
+    run_logger.mark_success()

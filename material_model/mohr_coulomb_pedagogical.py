@@ -5,17 +5,37 @@ import numpy as np
 # PEDAGOGICAL MOHR-COULOMB CONSTITUTIVE MODEL
 #
 # Sign convention:
-#   compression stress  = positive
-#   compression strain  = positive
+#   compression stress = positive
+#   compression strain = positive
 #
 # Cartesian Voigt ordering:
-#   [xx, yy, zz, xy, yz, xz]
+#   stress = [xx, yy, zz, xy, yz, xz]
+#   strain = [xx, yy, zz, gamma_xy, gamma_yz, gamma_xz]
 #
 # Principal ordering:
 #   sigma1 >= sigma2 >= sigma3
 #
-# This is a pedagogical implementation.
-# Not yet the production GeoPyFEM material model.
+# Features:
+#   - 3D principal-stress return mapping
+#   - non-associated flow allowed: psi != phi
+#   - face return
+#   - compression-edge return
+#   - extension-edge return
+#   - pedagogical fixed-apex projection
+#   - analytic principal tangent
+#   - analytic Cartesian spectral tangent
+#   - numerical tangent verification
+#   - repeated-eigenvalue numerical fallback
+#
+# IMPORTANT:
+#   This is still a pedagogical / production-candidate model.
+#
+#   The following are NOT yet considered final production
+#   formulations:
+#
+#       1. non-associated apex return
+#       2. repeated-eigenvalue analytic spectral limit
+#
 # ============================================================
 
 
@@ -26,37 +46,101 @@ import numpy as np
 def elastic_matrix_3d(E, nu):
     """
     3D isotropic elastic constitutive matrix.
+
+    Stress Voigt ordering:
+        [xx, yy, zz, xy, yz, xz]
+
+    Strain uses engineering shear strains:
+        [exx, eyy, ezz, gamma_xy, gamma_yz, gamma_xz]
     """
 
-    G = E / (2.0 * (1.0 + nu))
+    G = E / (
+        2.0 * (1.0 + nu)
+    )
 
     lam = (
         E * nu
-        / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        / (
+            (1.0 + nu)
+            * (1.0 - 2.0 * nu)
+        )
     )
 
     D = np.array([
-        [lam + 2.0 * G, lam,           lam,           0.0, 0.0, 0.0],
-        [lam,           lam + 2.0 * G, lam,           0.0, 0.0, 0.0],
-        [lam,           lam,           lam + 2.0 * G, 0.0, 0.0, 0.0],
-        [0.0,           0.0,           0.0,           G,   0.0, 0.0],
-        [0.0,           0.0,           0.0,           0.0, G,   0.0],
-        [0.0,           0.0,           0.0,           0.0, 0.0, G],
-    ])
+        [
+            lam + 2.0 * G,
+            lam,
+            lam,
+            0.0,
+            0.0,
+            0.0,
+        ],
+
+        [
+            lam,
+            lam + 2.0 * G,
+            lam,
+            0.0,
+            0.0,
+            0.0,
+        ],
+
+        [
+            lam,
+            lam,
+            lam + 2.0 * G,
+            0.0,
+            0.0,
+            0.0,
+        ],
+
+        [
+            0.0,
+            0.0,
+            0.0,
+            G,
+            0.0,
+            0.0,
+        ],
+
+        [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            G,
+            0.0,
+        ],
+
+        [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            G,
+        ],
+    ], dtype=float)
 
     return D
 
 
-def principal_elastic_matrix(E, nu):
+def principal_elastic_matrix(
+    E,
+    nu,
+):
     """
-    Elastic matrix for normal components in principal space.
+    Normal elastic matrix in principal space.
 
-    [sigma1]   [       ] [epsilon1]
-    [sigma2] = [  Dp   ] [epsilon2]
-    [sigma3]   [       ] [epsilon3]
+    [sigma1]   [    ] [epsilon1]
+    [sigma2] = [ Dp ] [epsilon2]
+    [sigma3]   [    ] [epsilon3]
     """
 
-    D = elastic_matrix_3d(E, nu)
+    D = elastic_matrix_3d(
+        E,
+        nu,
+    )
 
     return D[:3, :3]
 
@@ -65,62 +149,116 @@ def principal_elastic_matrix(E, nu):
 # 2. STRESS REPRESENTATION
 # ============================================================
 
-def stress_vector_to_tensor(stress):
+def stress_vector_to_tensor(
+    stress,
+):
     """
-    Voigt stress vector -> 3x3 stress tensor.
+    Convert:
 
-    stress =
-    [sxx, syy, szz, txy, tyz, txz]
-    """
+        [sxx, syy, szz, txy, tyz, txz]
 
-    sxx, syy, szz, txy, tyz, txz = stress
-
-    return np.array([
-        [sxx, txy, txz],
-        [txy, syy, tyz],
-        [txz, tyz, szz],
-    ])
-
-
-def stress_tensor_to_vector(tensor):
-    """
-    3x3 stress tensor -> Voigt stress vector.
+    into symmetric 3x3 stress tensor.
     """
 
-    return np.array([
+    (
+        sxx,
+        syy,
+        szz,
+        txy,
+        tyz,
+        txz,
+    ) = stress
+
+    tensor = np.array([
+        [
+            sxx,
+            txy,
+            txz,
+        ],
+
+        [
+            txy,
+            syy,
+            tyz,
+        ],
+
+        [
+            txz,
+            tyz,
+            szz,
+        ],
+    ], dtype=float)
+
+    return tensor
+
+
+def stress_tensor_to_vector(
+    tensor,
+):
+    """
+    Convert symmetric 3x3 stress tensor
+    into Cartesian Voigt vector.
+    """
+
+    stress = np.array([
         tensor[0, 0],
         tensor[1, 1],
         tensor[2, 2],
         tensor[0, 1],
         tensor[1, 2],
         tensor[0, 2],
-    ])
+    ], dtype=float)
+
+    return stress
 
 
 # ============================================================
 # 3. PRINCIPAL STRESS DECOMPOSITION
 # ============================================================
 
-def principal_decomposition(stress):
+def principal_decomposition(
+    stress,
+):
     """
-    Return ordered principal stresses and directions.
+    Calculate principal stresses and principal directions.
 
     Compression-positive ordering:
 
         sigma1 >= sigma2 >= sigma3
     """
 
-    tensor = stress_vector_to_tensor(stress)
+    stress_tensor = (
+        stress_vector_to_tensor(
+            stress
+        )
+    )
 
-    values, vectors = np.linalg.eigh(tensor)
+    values, vectors = (
+        np.linalg.eigh(
+            stress_tensor
+        )
+    )
 
-    # NumPy gives ascending eigenvalues.
-    order = np.argsort(values)[::-1]
+    # np.linalg.eigh gives ascending eigenvalues.
+    # We use descending principal stresses.
 
-    values = values[order]
-    vectors = vectors[:, order]
+    order = np.argsort(
+        values
+    )[::-1]
 
-    return values, vectors
+    values = values[
+        order
+    ]
+
+    vectors = vectors[
+        :,
+        order,
+    ]
+
+    return (
+        values,
+        vectors,
+    )
 
 
 def principal_to_cartesian(
@@ -128,47 +266,90 @@ def principal_to_cartesian(
     directions,
 ):
     """
-    Reconstruct Cartesian stress from principal stresses.
+    Reconstruct Cartesian stress:
 
-        sigma = Q diag(sigma_p) Q.T
+        sigma =
+        Q diag(sigma1,sigma2,sigma3) Q.T
     """
 
     tensor = (
         directions
-        @ np.diag(principal_stress)
+        @ np.diag(
+            principal_stress
+        )
         @ directions.T
     )
 
-    return stress_tensor_to_vector(tensor)
+    return (
+        stress_tensor_to_vector(
+            tensor
+        )
+    )
 
 
 # ============================================================
 # 4. MOHR-COULOMB SURFACES
 # ============================================================
 
-def mc_plane_vectors(phi, psi):
+def mc_plane_vectors(
+    phi,
+    psi,
+):
     """
-    Construct yield normals and plastic-flow directions.
+    Construct Mohr-Coulomb yield normals
+    and plastic-flow directions.
 
-    Angles in degrees.
+    Angles are in degrees.
     """
 
-    phi_rad = np.radians(phi)
-    psi_rad = np.radians(psi)
+    phi_rad = np.radians(
+        phi
+    )
+
+    psi_rad = np.radians(
+        psi
+    )
 
     # --------------------------------------------------------
     # Yield surface
+    #
+    # f =
+    # (1-sin(phi))*sigma1
+    # -(1+sin(phi))*sigma3
+    # -2c*cos(phi)
     # --------------------------------------------------------
 
-    A = 1.0 - np.sin(phi_rad)
-    B = 1.0 + np.sin(phi_rad)
+    A = (
+        1.0
+        - np.sin(
+            phi_rad
+        )
+    )
+
+    B = (
+        1.0
+        + np.sin(
+            phi_rad
+        )
+    )
 
     # --------------------------------------------------------
     # Plastic potential
     # --------------------------------------------------------
 
-    Ap = 1.0 - np.sin(psi_rad)
-    Bp = 1.0 + np.sin(psi_rad)
+    Ap = (
+        1.0
+        - np.sin(
+            psi_rad
+        )
+    )
+
+    Bp = (
+        1.0
+        + np.sin(
+            psi_rad
+        )
+    )
 
     # --------------------------------------------------------
     # Yield normals
@@ -178,41 +359,41 @@ def mc_plane_vectors(phi, psi):
         A,
         0.0,
         -B,
-    ])
+    ], dtype=float)
 
     a12 = np.array([
         A,
         -B,
         0.0,
-    ])
+    ], dtype=float)
 
     a23 = np.array([
         0.0,
         A,
         -B,
-    ])
+    ], dtype=float)
 
     # --------------------------------------------------------
-    # Plastic flow directions
+    # Plastic-flow directions
     # --------------------------------------------------------
 
     b13 = np.array([
         Ap,
         0.0,
         -Bp,
-    ])
+    ], dtype=float)
 
     b12 = np.array([
         Ap,
         -Bp,
         0.0,
-    ])
+    ], dtype=float)
 
     b23 = np.array([
         0.0,
         Ap,
         -Bp,
-    ])
+    ], dtype=float)
 
     return (
         a13,
@@ -224,17 +405,26 @@ def mc_plane_vectors(phi, psi):
     )
 
 
-def cohesion_term(c, phi):
+def cohesion_term(
+    c,
+    phi,
+):
     """
-    C = 2 c cos(phi)
+    Mohr-Coulomb cohesion term:
+
+        C = 2 c cos(phi)
     """
 
-    phi_rad = np.radians(phi)
+    phi_rad = np.radians(
+        phi
+    )
 
     return (
         2.0
         * c
-        * np.cos(phi_rad)
+        * np.cos(
+            phi_rad
+        )
     )
 
 
@@ -244,13 +434,14 @@ def yield_value(
     C,
 ):
     """
-    Linear Mohr-Coulomb surface:
+    Evaluate one linear Mohr-Coulomb plane:
 
         f = a.T sigma - C
     """
 
     return float(
-        a @ stress_p - C
+        a @ stress_p
+        - C
     )
 
 
@@ -266,40 +457,63 @@ def active_set_return(
     C,
 ):
     """
-    Return mapping for a specified active set.
+    Generic active-set return mapping.
 
-    Parameters
-    ----------
-    stress_trial : (3,) array
+    A:
+        active yield normals
 
-    Dp : (3,3) array
-        Elastic matrix in principal space.
+    B:
+        active plastic-flow directions
 
-    A : (3,n) array
-        Active yield normals.
+    For face:
+        A.shape = (3,1)
+        B.shape = (3,1)
 
-    B : (3,n) array
-        Active plastic-flow directions.
+    For edge:
+        A.shape = (3,2)
+        B.shape = (3,2)
 
     Returns
     -------
     stress_new
+
     dstrain_p
+
     dlambda
+
     Dalg
+        principal algorithmic tangent:
+
+        d sigma_new
+        -----------
+        d epsilon_principal
+
+    H
+        principal stress Jacobian:
+
+        d sigma_new
+        -----------
+        d sigma_trial
     """
 
-    n_active = A.shape[1]
+    n_active = (
+        A.shape[1]
+    )
 
     # ========================================================
-    # Trial values of active yield surfaces
+    # Trial yield values
     #
-    # f_trial = A.T sigma_trial - C
+    # f_trial =
+    # A.T sigma_trial - C
     # ========================================================
 
     f_trial = (
-        A.T @ stress_trial
-        - C * np.ones(n_active)
+        A.T
+        @ stress_trial
+        - C
+        * np.ones(
+            n_active
+        )
     )
 
     # ========================================================
@@ -320,9 +534,11 @@ def active_set_return(
     # M dlambda = f_trial
     # ========================================================
 
-    dlambda = np.linalg.solve(
-        M,
-        f_trial,
+    dlambda = (
+        np.linalg.solve(
+            M,
+            f_trial,
+        )
     )
 
     # ========================================================
@@ -332,11 +548,12 @@ def active_set_return(
     # ========================================================
 
     dstrain_p = (
-        B @ dlambda
+        B
+        @ dlambda
     )
 
     # ========================================================
-    # Corrected stress
+    # Corrected principal stress
     #
     # sigma_new =
     # sigma_trial - D deps_p
@@ -344,27 +561,52 @@ def active_set_return(
 
     stress_new = (
         stress_trial
-        - Dp @ dstrain_p
+        - Dp
+        @ dstrain_p
     )
 
     # ========================================================
-    # ALGORITHMIC TANGENT
+    # PRINCIPAL-STRESS JACOBIAN
+    #
+    # H =
+    #
+    # d sigma_new
+    # -----------
+    # d sigma_trial
+    #
+    # H =
+    # I - D B (A.T D B)^(-1) A.T
+    # ========================================================
+
+    Y = (
+        np.linalg.solve(
+            M,
+            A.T,
+        )
+    )
+
+    H = (
+        np.eye(3)
+        - Dp
+        @ B
+        @ Y
+    )
+
+    # ========================================================
+    # PRINCIPAL ALGORITHMIC TANGENT
     #
     # Dalg =
     #
-    # D - D B (A.T D B)^(-1) A.T D
+    # d sigma_new
+    # -----------
+    # d epsilon
     #
-    # Do not explicitly invert M.
+    # Dalg = H Dp
     # ========================================================
 
-    X = np.linalg.solve(
-        M,
-        A.T @ Dp,
-    )
-
     Dalg = (
-        Dp
-        - Dp @ B @ X
+        H
+        @ Dp
     )
 
     return (
@@ -372,6 +614,7 @@ def active_set_return(
         dstrain_p,
         dlambda,
         Dalg,
+        H,
     )
 
 
@@ -384,12 +627,16 @@ def is_ordered(
     tol=1e-10,
 ):
     """
-    Check:
+    Check principal ordering:
 
         sigma1 >= sigma2 >= sigma3
     """
 
-    s1, s2, s3 = stress
+    (
+        s1,
+        s2,
+        s3,
+    ) = stress
 
     return (
         s1 >= s2 - tol
@@ -409,16 +656,25 @@ def valid_compression_edge(
         sigma1 >= sigma2 = sigma3
     """
 
-    s1, s2, s3 = stress
+    (
+        s1,
+        s2,
+        s3,
+    ) = stress
 
     stress_ok = (
         s1 >= s2 - tol
         and
-        abs(s2 - s3) <= tol
+        abs(
+            s2 - s3
+        ) <= tol
     )
 
-    multiplier_ok = np.all(
-        dlambda >= -tol
+    multiplier_ok = (
+        np.all(
+            dlambda
+            >= -tol
+        )
     )
 
     return (
@@ -439,16 +695,25 @@ def valid_extension_edge(
         sigma1 = sigma2 >= sigma3
     """
 
-    s1, s2, s3 = stress
+    (
+        s1,
+        s2,
+        s3,
+    ) = stress
 
     stress_ok = (
-        abs(s1 - s2) <= tol
+        abs(
+            s1 - s2
+        ) <= tol
         and
         s2 >= s3 - tol
     )
 
-    multiplier_ok = np.all(
-        dlambda >= -tol
+    multiplier_ok = (
+        np.all(
+            dlambda
+            >= -tol
+        )
     )
 
     return (
@@ -471,7 +736,8 @@ def principal_return_mohr_coulomb(
     tol=1e-8,
 ):
     """
-    Mohr-Coulomb return mapping in ordered principal space.
+    Mohr-Coulomb return mapping
+    in ordered principal-stress space.
 
     Possible regions:
 
@@ -503,13 +769,18 @@ def principal_return_mohr_coulomb(
     # 7.1 ELASTIC CHECK
     # ========================================================
 
-    f13_trial = yield_value(
-        stress_trial,
-        a13,
-        C,
+    f13_trial = (
+        yield_value(
+            stress_trial,
+            a13,
+            C,
+        )
     )
 
-    if f13_trial <= tol:
+    if (
+        f13_trial
+        <= tol
+    ):
 
         return {
             "stress":
@@ -529,6 +800,9 @@ def principal_return_mohr_coulomb(
 
             "tangent_principal":
                 Dp.copy(),
+
+            "principal_jacobian":
+                np.eye(3),
         }
 
     # ========================================================
@@ -536,11 +810,17 @@ def principal_return_mohr_coulomb(
     # ========================================================
 
     A_face = (
-        a13.reshape(3, 1)
+        a13.reshape(
+            3,
+            1,
+        )
     )
 
     B_face = (
-        b13.reshape(3, 1)
+        b13.reshape(
+            3,
+            1,
+        )
     )
 
     (
@@ -548,6 +828,7 @@ def principal_return_mohr_coulomb(
         deps_face,
         dlambda_face,
         Dalg_face,
+        H_face,
     ) = active_set_return(
         stress_trial,
         Dp,
@@ -579,32 +860,44 @@ def principal_return_mohr_coulomb(
 
             "tangent_principal":
                 Dalg_face,
+
+            "principal_jacobian":
+                H_face,
         }
 
     # ========================================================
     # 7.3 COMPRESSION EDGE
     #
-    # Active:
+    # Active surfaces:
     #
     # f13 = 0
     # f12 = 0
+    #
+    # Corrected condition:
+    #
+    # sigma1 > sigma2 = sigma3
     # ========================================================
 
-    A_ce = np.column_stack([
-        a13,
-        a12,
-    ])
+    A_ce = (
+        np.column_stack([
+            a13,
+            a12,
+        ])
+    )
 
-    B_ce = np.column_stack([
-        b13,
-        b12,
-    ])
+    B_ce = (
+        np.column_stack([
+            b13,
+            b12,
+        ])
+    )
 
     (
         stress_ce,
         deps_ce,
         dlambda_ce,
         Dalg_ce,
+        H_ce,
     ) = active_set_return(
         stress_trial,
         Dp,
@@ -637,32 +930,44 @@ def principal_return_mohr_coulomb(
 
             "tangent_principal":
                 Dalg_ce,
+
+            "principal_jacobian":
+                H_ce,
         }
 
     # ========================================================
     # 7.4 EXTENSION EDGE
     #
-    # Active:
+    # Active surfaces:
     #
     # f13 = 0
     # f23 = 0
+    #
+    # Corrected condition:
+    #
+    # sigma1 = sigma2 > sigma3
     # ========================================================
 
-    A_ee = np.column_stack([
-        a13,
-        a23,
-    ])
+    A_ee = (
+        np.column_stack([
+            a13,
+            a23,
+        ])
+    )
 
-    B_ee = np.column_stack([
-        b13,
-        b23,
-    ])
+    B_ee = (
+        np.column_stack([
+            b13,
+            b23,
+        ])
+    )
 
     (
         stress_ee,
         deps_ee,
         dlambda_ee,
         Dalg_ee,
+        H_ee,
     ) = active_set_return(
         stress_trial,
         Dp,
@@ -695,29 +1000,45 @@ def principal_return_mohr_coulomb(
 
             "tangent_principal":
                 Dalg_ee,
+
+            "principal_jacobian":
+                H_ee,
         }
 
     # ========================================================
     # 7.5 APEX
     #
-    # Pedagogical fixed-apex projection.
+    # Pedagogical geometric fixed-apex projection.
     #
-    # Production non-associated MC requires
-    # special apex treatment.
+    # IMPORTANT:
+    #
+    # This is NOT yet considered a rigorous final
+    # non-associated Mohr-Coulomb apex algorithm.
     # ========================================================
 
-    phi_rad = np.radians(phi)
+    phi_rad = np.radians(
+        phi
+    )
 
-    if abs(np.sin(phi_rad)) < 1e-14:
+    if (
+        abs(
+            np.sin(
+                phi_rad
+            )
+        )
+        < 1e-14
+    ):
 
         raise ValueError(
-            "Mohr-Coulomb apex is undefined "
-            "for phi = 0."
+            "Mohr-Coulomb apex is "
+            "undefined for phi = 0."
         )
 
     p_apex = (
         -c
-        / np.tan(phi_rad)
+        / np.tan(
+            phi_rad
+        )
     )
 
     stress_apex = np.array([
@@ -725,14 +1046,6 @@ def principal_return_mohr_coulomb(
         p_apex,
         p_apex,
     ])
-
-    # --------------------------------------------------------
-    # Pedagogical tangent for fixed-apex projection
-    # --------------------------------------------------------
-
-    Dalg_apex = np.zeros(
-        (3, 3)
-    )
 
     return {
         "stress":
@@ -751,15 +1064,289 @@ def principal_return_mohr_coulomb(
             None,
 
         "tangent_principal":
-            Dalg_apex,
+            np.zeros(
+                (3, 3)
+            ),
+
+        "principal_jacobian":
+            np.zeros(
+                (3, 3)
+            ),
     }
 
 
 # ============================================================
-# 8. FULL CARTESIAN STRESS UPDATE
+# 8. REPEATED PRINCIPAL STRESS CHECK
 # ============================================================
 
-def stress_update(
+def has_repeated_principal_stress(
+    principal_stress,
+    rel_tol=1e-8,
+):
+    """
+    Detect repeated or nearly repeated
+    principal stresses.
+
+    Important because the simple spectral derivative
+    contains terms:
+
+        (sigma_i_new - sigma_j_new)
+        ---------------------------
+        (sigma_i_trial - sigma_j_trial)
+
+    which become problematic when the denominator
+    approaches zero.
+    """
+
+    scale = max(
+        1.0,
+        float(
+            np.max(
+                np.abs(
+                    principal_stress
+                )
+            )
+        ),
+    )
+
+    tol = (
+        rel_tol
+        * scale
+    )
+
+    (
+        s1,
+        s2,
+        s3,
+    ) = principal_stress
+
+    return (
+        abs(
+            s1 - s2
+        ) < tol
+        or
+        abs(
+            s2 - s3
+        ) < tol
+        or
+        abs(
+            s1 - s3
+        ) < tol
+    )
+
+
+# ============================================================
+# 9. ANALYTIC SPECTRAL CARTESIAN TANGENT
+# ============================================================
+
+def analytic_cartesian_tangent(
+    D_elastic,
+    principal_trial,
+    principal_new,
+    directions,
+    H,
+    eig_tol=1e-10,
+):
+    """
+    Construct full 6x6 Cartesian algorithmic tangent
+    using spectral differentiation.
+
+    Includes:
+
+        1. change of principal stress magnitudes
+        2. rotation of principal directions
+
+    Valid when:
+
+        - active constitutive branch is locally fixed
+        - trial principal stresses are distinct
+    """
+
+    Dcart = np.zeros(
+        (6, 6)
+    )
+
+    # --------------------------------------------------------
+    # Build Dcart column by column.
+    #
+    # Each column corresponds to one unit Cartesian
+    # strain perturbation.
+    # --------------------------------------------------------
+
+    for j in range(6):
+
+        # ====================================================
+        # Unit strain perturbation
+        # ====================================================
+
+        deps = np.zeros(6)
+
+        deps[j] = 1.0
+
+        # ====================================================
+        # Elastic trial-stress differential
+        #
+        # d sigma_trial =
+        # D_elastic d epsilon
+        # ====================================================
+
+        dstress_trial_vec = (
+            D_elastic
+            @ deps
+        )
+
+        dstress_trial_tensor = (
+            stress_vector_to_tensor(
+                dstress_trial_vec
+            )
+        )
+
+        # ====================================================
+        # Transform differential into principal coordinates
+        #
+        # d sigma_hat =
+        # Q.T d sigma_trial Q
+        # ====================================================
+
+        dtrial_p = (
+            directions.T
+            @ dstress_trial_tensor
+            @ directions
+        )
+
+        dnew_p = np.zeros(
+            (3, 3)
+        )
+
+        # ====================================================
+        # PART 1:
+        #
+        # CHANGE OF PRINCIPAL STRESS MAGNITUDES
+        #
+        # d sigma_new_diag =
+        # H d sigma_trial_diag
+        # ====================================================
+
+        dtrial_diag = (
+            np.diag(
+                dtrial_p
+            )
+        )
+
+        dnew_diag = (
+            H
+            @ dtrial_diag
+        )
+
+        for i in range(3):
+
+            dnew_p[
+                i,
+                i,
+            ] = (
+                dnew_diag[i]
+            )
+
+        # ====================================================
+        # PART 2:
+        #
+        # ROTATION OF PRINCIPAL DIRECTIONS
+        #
+        # beta_ij =
+        #
+        # sigma_i_new - sigma_j_new
+        # -------------------------
+        # sigma_i_trial - sigma_j_trial
+        # ====================================================
+
+        for i in range(3):
+
+            for k in range(
+                i + 1,
+                3,
+            ):
+
+                denominator = (
+                    principal_trial[i]
+                    - principal_trial[k]
+                )
+
+                scale = max(
+                    1.0,
+                    abs(
+                        principal_trial[i]
+                    ),
+                    abs(
+                        principal_trial[k]
+                    ),
+                )
+
+                if (
+                    abs(
+                        denominator
+                    )
+                    < eig_tol
+                    * scale
+                ):
+
+                    raise ValueError(
+                        "Repeated or nearly repeated "
+                        "trial principal stresses "
+                        "encountered in analytic "
+                        "spectral tangent."
+                    )
+
+                beta = (
+                    principal_new[i]
+                    - principal_new[k]
+                ) / denominator
+
+                value = (
+                    beta
+                    * dtrial_p[
+                        i,
+                        k,
+                    ]
+                )
+
+                dnew_p[
+                    i,
+                    k,
+                ] = value
+
+                dnew_p[
+                    k,
+                    i,
+                ] = value
+
+        # ====================================================
+        # Transform corrected differential
+        # back to Cartesian coordinates
+        # ====================================================
+
+        dnew_cart = (
+            directions
+            @ dnew_p
+            @ directions.T
+        )
+
+        Dcart[
+            :,
+            j,
+        ] = (
+            stress_tensor_to_vector(
+                dnew_cart
+            )
+        )
+
+    return Dcart
+
+
+# ============================================================
+# 10. STRESS UPDATE CORE
+# ============================================================
+
+def stress_update_core(
     stress_old,
     dstrain,
     E,
@@ -770,19 +1357,18 @@ def stress_update(
     tol=1e-8,
 ):
     """
-    Complete stress update.
+    Perform complete stress integration WITHOUT constructing
+    the final Cartesian algorithmic tangent.
 
-    Important:
-    tangent returned by principal return is still
-    in PRINCIPAL SPACE.
+    The separation is intentional.
 
-    We are not yet constructing the production
-    Cartesian 6x6 tangent.
+    Numerical tangent routines can call stress_update_core()
+    repeatedly without causing recursive tangent evaluation.
     """
 
-    # --------------------------------------------------------
+    # ========================================================
     # Elastic matrices
-    # --------------------------------------------------------
+    # ========================================================
 
     D = elastic_matrix_3d(
         E,
@@ -794,29 +1380,35 @@ def stress_update(
         nu,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Elastic predictor
-    # --------------------------------------------------------
+    #
+    # sigma_trial =
+    # sigma_old + D dstrain
+    # ========================================================
 
     stress_trial = (
         stress_old
-        + D @ dstrain
+        + D
+        @ dstrain
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Principal decomposition
-    # --------------------------------------------------------
+    # ========================================================
 
     (
         principal_trial,
         directions,
-    ) = principal_decomposition(
-        stress_trial
+    ) = (
+        principal_decomposition(
+            stress_trial
+        )
     )
 
-    # --------------------------------------------------------
-    # Mohr-Coulomb return
-    # --------------------------------------------------------
+    # ========================================================
+    # Mohr-Coulomb return mapping
+    # ========================================================
 
     principal_result = (
         principal_return_mohr_coulomb(
@@ -835,13 +1427,15 @@ def stress_update(
         ]
     )
 
-    # --------------------------------------------------------
-    # Back to Cartesian coordinates
-    # --------------------------------------------------------
+    # ========================================================
+    # Transform corrected stress back to Cartesian
+    # ========================================================
 
-    stress_new = principal_to_cartesian(
-        principal_new,
-        directions,
+    stress_new = (
+        principal_to_cartesian(
+            principal_new,
+            directions,
+        )
     )
 
     return {
@@ -859,6 +1453,19 @@ def stress_update(
 
         "principal_new":
             principal_new,
+
+        "principal_directions":
+            directions,
+
+        "principal_jacobian":
+            principal_result[
+                "principal_jacobian"
+            ],
+
+        "tangent_principal":
+            principal_result[
+                "tangent_principal"
+            ],
 
         "stress":
             stress_new,
@@ -882,16 +1489,597 @@ def stress_update(
             principal_result[
                 "dlambda"
             ],
-
-        "tangent_principal":
-            principal_result[
-                "tangent_principal"
-            ],
     }
 
 
 # ============================================================
-# 9. VERIFY RETURN CONDITIONS
+# 11. NUMERICAL CARTESIAN TANGENT
+# ============================================================
+
+def numerical_cartesian_tangent(
+    stress_old,
+    dstrain,
+    E,
+    nu,
+    c,
+    phi,
+    psi,
+    h=1e-7,
+):
+    """
+    Numerical 6x6 Cartesian tangent using
+    central finite differences.
+
+    Main purposes:
+
+        1. verification reference
+
+        2. provisional fallback for repeated
+           trial principal stresses
+
+    stress_update_core() is used intentionally so
+    there is no tangent recursion.
+    """
+
+    Dnum = np.zeros(
+        (6, 6)
+    )
+
+    for j in range(6):
+
+        dstrain_plus = (
+            dstrain.copy()
+        )
+
+        dstrain_minus = (
+            dstrain.copy()
+        )
+
+        dstrain_plus[j] += h
+
+        dstrain_minus[j] -= h
+
+        result_plus = (
+            stress_update_core(
+                stress_old,
+                dstrain_plus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        result_minus = (
+            stress_update_core(
+                stress_old,
+                dstrain_minus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        Dnum[
+            :,
+            j,
+        ] = (
+            result_plus[
+                "stress"
+            ]
+            - result_minus[
+                "stress"
+            ]
+        ) / (
+            2.0
+            * h
+        )
+
+    return Dnum
+
+
+# ============================================================
+# 12. COMPLETE STRESS UPDATE
+# ============================================================
+
+def stress_update(
+    stress_old,
+    dstrain,
+    E,
+    nu,
+    c,
+    phi,
+    psi,
+    tol=1e-8,
+    repeated_eigenvalue_fallback=True,
+    numerical_tangent_h=1e-7,
+):
+    """
+    Complete pedagogical Mohr-Coulomb constitutive update.
+
+    Input
+    -----
+    stress_old
+        committed Cartesian stress
+
+    dstrain
+        Cartesian strain increment
+
+    Output
+    ------
+    corrected stress
+
+    algorithmic tangent
+
+    principal information
+
+    region
+
+    yielded flag
+
+    Tangent strategy
+    ----------------
+    elastic:
+        D_elastic
+
+    apex:
+        zero tangent
+        (pedagogical fixed-apex treatment only)
+
+    plastic + distinct trial eigenvalues:
+        analytic spectral Cartesian tangent
+
+    plastic + repeated trial eigenvalues:
+        numerical tangent fallback
+        if enabled
+    """
+
+    result = (
+        stress_update_core(
+            stress_old,
+            dstrain,
+            E,
+            nu,
+            c,
+            phi,
+            psi,
+            tol,
+        )
+    )
+
+    D = elastic_matrix_3d(
+        E,
+        nu,
+    )
+
+    region = result[
+        "region"
+    ]
+
+    # ========================================================
+    # ELASTIC
+    # ========================================================
+
+    if (
+        region
+        == "elastic"
+    ):
+
+        Dalg_cartesian = (
+            D.copy()
+        )
+
+        tangent_mode = (
+            "elastic"
+        )
+
+    # ========================================================
+    # APEX
+    # ========================================================
+
+    elif (
+        region
+        == "apex_projection"
+    ):
+
+        # ----------------------------------------------------
+        # Pedagogical fixed-apex tangent.
+        #
+        # NOT final non-associated apex formulation.
+        # ----------------------------------------------------
+
+        Dalg_cartesian = (
+            np.zeros(
+                (6, 6)
+            )
+        )
+
+        tangent_mode = (
+            "apex_zero_pedagogical"
+        )
+
+    # ========================================================
+    # REPEATED TRIAL PRINCIPAL STRESSES
+    # ========================================================
+
+    elif (
+        has_repeated_principal_stress(
+            result[
+                "principal_trial"
+            ]
+        )
+    ):
+
+        if (
+            not
+            repeated_eigenvalue_fallback
+        ):
+
+            raise ValueError(
+                "Repeated trial principal "
+                "stresses require special "
+                "spectral treatment or "
+                "a fallback tangent."
+            )
+
+        Dalg_cartesian = (
+            numerical_cartesian_tangent(
+                stress_old,
+                dstrain,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+                h=numerical_tangent_h,
+            )
+        )
+
+        tangent_mode = (
+            "numerical_repeated_"
+            "eigenvalue_fallback"
+        )
+
+    # ========================================================
+    # ANALYTIC SPECTRAL TANGENT
+    # ========================================================
+
+    else:
+
+        Dalg_cartesian = (
+            analytic_cartesian_tangent(
+                D_elastic=D,
+
+                principal_trial=
+                    result[
+                        "principal_trial"
+                    ],
+
+                principal_new=
+                    result[
+                        "principal_new"
+                    ],
+
+                directions=
+                    result[
+                        "principal_directions"
+                    ],
+
+                H=
+                    result[
+                        "principal_jacobian"
+                    ],
+            )
+        )
+
+        tangent_mode = (
+            "analytic_spectral"
+        )
+
+    result[
+        "tangent"
+    ] = (
+        Dalg_cartesian
+    )
+
+    result[
+        "tangent_mode"
+    ] = (
+        tangent_mode
+    )
+
+    return result
+
+
+# ============================================================
+# 13. PRINCIPAL-SPACE UPDATE
+#
+# Used for tangent verification.
+# ============================================================
+
+def principal_stress_update(
+    stress_old,
+    dstrain,
+    E,
+    nu,
+    c,
+    phi,
+    psi,
+    tol=1e-8,
+):
+    """
+    Constitutive update entirely in principal space.
+
+    Used for verification of the principal
+    active-set tangent.
+    """
+
+    Dp = principal_elastic_matrix(
+        E,
+        nu,
+    )
+
+    stress_trial = (
+        stress_old
+        + Dp
+        @ dstrain
+    )
+
+    return (
+        principal_return_mohr_coulomb(
+            stress_trial,
+            Dp,
+            c,
+            phi,
+            psi,
+            tol,
+        )
+    )
+
+
+# ============================================================
+# 14. NUMERICAL PRINCIPAL TANGENT
+# ============================================================
+
+def numerical_principal_tangent(
+    stress_old,
+    dstrain,
+    E,
+    nu,
+    c,
+    phi,
+    psi,
+    h=1e-7,
+):
+    """
+    Numerical 3x3 principal tangent
+    using central finite difference.
+    """
+
+    Dnum = np.zeros(
+        (3, 3)
+    )
+
+    for j in range(3):
+
+        dstrain_plus = (
+            dstrain.copy()
+        )
+
+        dstrain_minus = (
+            dstrain.copy()
+        )
+
+        dstrain_plus[j] += h
+
+        dstrain_minus[j] -= h
+
+        result_plus = (
+            principal_stress_update(
+                stress_old,
+                dstrain_plus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        result_minus = (
+            principal_stress_update(
+                stress_old,
+                dstrain_minus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        Dnum[
+            :,
+            j,
+        ] = (
+            result_plus[
+                "stress"
+            ]
+            - result_minus[
+                "stress"
+            ]
+        ) / (
+            2.0
+            * h
+        )
+
+    return Dnum
+
+
+# ============================================================
+# 15. SAME-REGION NUMERICAL CARTESIAN TANGENT
+# ============================================================
+
+def same_region_numerical_cartesian_tangent(
+    stress_old,
+    dstrain,
+    E,
+    nu,
+    c,
+    phi,
+    psi,
+    h=1e-7,
+):
+    """
+    Numerical tangent intended for non-smooth MC regions.
+
+    Preference:
+
+        central difference
+
+    if +h and -h remain in the same constitutive
+    region as the base state.
+
+    Otherwise:
+
+        same-region one-sided difference.
+
+    If neither perturbation remains in the same region,
+    the corresponding tangent column is NaN.
+    """
+
+    base = stress_update_core(
+        stress_old,
+        dstrain,
+        E,
+        nu,
+        c,
+        phi,
+        psi,
+    )
+
+    base_region = (
+        base[
+            "region"
+        ]
+    )
+
+    base_stress = (
+        base[
+            "stress"
+        ]
+    )
+
+    Dnum = np.full(
+        (6, 6),
+        np.nan,
+    )
+
+    for j in range(6):
+
+        deps_plus = (
+            dstrain.copy()
+        )
+
+        deps_minus = (
+            dstrain.copy()
+        )
+
+        deps_plus[j] += h
+
+        deps_minus[j] -= h
+
+        plus = (
+            stress_update_core(
+                stress_old,
+                deps_plus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        minus = (
+            stress_update_core(
+                stress_old,
+                deps_minus,
+                E,
+                nu,
+                c,
+                phi,
+                psi,
+            )
+        )
+
+        same_plus = (
+            plus[
+                "region"
+            ]
+            == base_region
+        )
+
+        same_minus = (
+            minus[
+                "region"
+            ]
+            == base_region
+        )
+
+        if (
+            same_plus
+            and
+            same_minus
+        ):
+
+            Dnum[
+                :,
+                j,
+            ] = (
+                plus[
+                    "stress"
+                ]
+                - minus[
+                    "stress"
+                ]
+            ) / (
+                2.0
+                * h
+            )
+
+        elif same_plus:
+
+            Dnum[
+                :,
+                j,
+            ] = (
+                plus[
+                    "stress"
+                ]
+                - base_stress
+            ) / h
+
+        elif same_minus:
+
+            Dnum[
+                :,
+                j,
+            ] = (
+                base_stress
+                - minus[
+                    "stress"
+                ]
+            ) / h
+
+    return Dnum
+
+
+# ============================================================
+# 16. VERIFY PRINCIPAL RETURN
 # ============================================================
 
 def verify_principal_return(
@@ -901,8 +2089,8 @@ def verify_principal_return(
     tol=1e-6,
 ):
     """
-    Check that corrected stress satisfies the correct
-    Mohr-Coulomb constraints.
+    Verify corrected stress satisfies
+    the expected MC constraints.
     """
 
     stress = result[
@@ -948,202 +2136,157 @@ def verify_principal_return(
         C,
     )
 
-    if region == "elastic":
+    if (
+        region
+        == "elastic"
+    ):
 
-        assert f13 <= tol
-
-    elif region == "face":
-
-        assert abs(f13) <= tol
-
-        assert is_ordered(
-            stress,
-            tol,
+        assert (
+            f13
+            <= tol
         )
 
-    elif region == "compression_edge":
+    elif (
+        region
+        == "face"
+    ):
 
-        assert abs(f13) <= tol
-        assert abs(f12) <= tol
+        assert (
+            abs(
+                f13
+            )
+            <= tol
+        )
 
-        assert abs(
-            stress[1]
-            - stress[2]
-        ) <= tol
+        assert (
+            is_ordered(
+                stress,
+                tol,
+            )
+        )
 
-    elif region == "extension_edge":
+    elif (
+        region
+        == "compression_edge"
+    ):
 
-        assert abs(f13) <= tol
-        assert abs(f23) <= tol
+        assert (
+            abs(
+                f13
+            )
+            <= tol
+        )
 
-        assert abs(
-            stress[0]
-            - stress[1]
-        ) <= tol
+        assert (
+            abs(
+                f12
+            )
+            <= tol
+        )
 
-    elif region == "apex_projection":
+        assert (
+            abs(
+                stress[1]
+                - stress[2]
+            )
+            <= tol
+        )
 
-        assert abs(f13) <= tol
-        assert abs(f12) <= tol
-        assert abs(f23) <= tol
+    elif (
+        region
+        == "extension_edge"
+    ):
 
-        assert np.allclose(
-            stress,
-            stress[0],
-            atol=tol,
+        assert (
+            abs(
+                f13
+            )
+            <= tol
+        )
+
+        assert (
+            abs(
+                f23
+            )
+            <= tol
+        )
+
+        assert (
+            abs(
+                stress[0]
+                - stress[1]
+            )
+            <= tol
+        )
+
+    elif (
+        region
+        == "apex_projection"
+    ):
+
+        assert (
+            abs(
+                f13
+            )
+            <= tol
+        )
+
+        assert (
+            abs(
+                f12
+            )
+            <= tol
+        )
+
+        assert (
+            abs(
+                f23
+            )
+            <= tol
+        )
+
+        assert (
+            np.allclose(
+                stress,
+                stress[0],
+                atol=tol,
+            )
         )
 
     else:
 
         raise ValueError(
-            f"Unknown region: {region}"
+            f"Unknown region: "
+            f"{region}"
         )
 
 
 # ============================================================
-# 10. PRINCIPAL-SPACE MATERIAL UPDATE
-#
-# Used specifically for tangent verification.
-# ============================================================
-
-def principal_stress_update(
-    stress_old,
-    dstrain,
-    E,
-    nu,
-    c,
-    phi,
-    psi,
-    tol=1e-8,
-):
-    """
-    Constitutive update entirely in principal space.
-
-    This avoids principal-direction rotation and is useful
-    for verifying the active-set tangent.
-    """
-
-    Dp = principal_elastic_matrix(
-        E,
-        nu,
-    )
-
-    stress_trial = (
-        stress_old
-        + Dp @ dstrain
-    )
-
-    return principal_return_mohr_coulomb(
-        stress_trial,
-        Dp,
-        c,
-        phi,
-        psi,
-        tol,
-    )
-
-
-# ============================================================
-# 11. NUMERICAL PRINCIPAL TANGENT
-# ============================================================
-
-def numerical_principal_tangent(
-    stress_old,
-    dstrain,
-    E,
-    nu,
-    c,
-    phi,
-    psi,
-    h=1e-7,
-):
-    """
-    Numerical tangent using central finite differences.
-
-    D_ij =
-        d sigma_i / d epsilon_j
-    """
-
-    Dnum = np.zeros(
-        (3, 3)
-    )
-
-    for j in range(3):
-
-        dstrain_plus = (
-            dstrain.copy()
-        )
-
-        dstrain_minus = (
-            dstrain.copy()
-        )
-
-        dstrain_plus[j] += h
-        dstrain_minus[j] -= h
-
-        result_plus = (
-            principal_stress_update(
-                stress_old,
-                dstrain_plus,
-                E,
-                nu,
-                c,
-                phi,
-                psi,
-            )
-        )
-
-        result_minus = (
-            principal_stress_update(
-                stress_old,
-                dstrain_minus,
-                E,
-                nu,
-                c,
-                phi,
-                psi,
-            )
-        )
-
-        stress_plus = (
-            result_plus[
-                "stress"
-            ]
-        )
-
-        stress_minus = (
-            result_minus[
-                "stress"
-            ]
-        )
-
-        Dnum[:, j] = (
-            stress_plus
-            - stress_minus
-        ) / (2.0 * h)
-
-    return Dnum
-
-
-# ============================================================
-# 12. STRESS INVARIANTS
+# 17. STRESS INVARIANTS
 # ============================================================
 
 def stress_invariants_from_principal(
     principal_stress,
 ):
     """
-    Calculate p and q.
+    Calculate:
+
+        p = mean stress
+        q = sqrt(3 J2)
 
     Compression positive.
     """
 
-    s1, s2, s3 = (
-        principal_stress
-    )
+    (
+        s1,
+        s2,
+        s3,
+    ) = principal_stress
 
     p = (
-        s1 + s2 + s3
+        s1
+        + s2
+        + s3
     ) / 3.0
 
     q = np.sqrt(
@@ -1155,11 +2298,15 @@ def stress_invariants_from_principal(
         )
     )
 
-    return p, q
+    return (
+        p,
+        q,
+    )
 
 
 # ============================================================
-# 13. PRINCIPAL REGION TEST
+# 18. TEST:
+# PRINCIPAL RETURN REGIONS
 # ============================================================
 
 def test_principal_regions():
@@ -1177,8 +2324,10 @@ def test_principal_regions():
     )
 
     tests = [
+
         (
             "elastic",
+
             np.array([
                 200.0,
                 120.0,
@@ -1188,6 +2337,7 @@ def test_principal_regions():
 
         (
             "face",
+
             np.array([
                 400.0,
                 120.0,
@@ -1197,6 +2347,7 @@ def test_principal_regions():
 
         (
             "compression_edge",
+
             np.array([
                 600.0,
                 120.0,
@@ -1206,6 +2357,7 @@ def test_principal_regions():
 
         (
             "extension_edge",
+
             np.array([
                 400.0,
                 390.0,
@@ -1215,6 +2367,7 @@ def test_principal_regions():
 
         (
             "apex_projection",
+
             np.array([
                 -30.0,
                 -30.0,
@@ -1224,9 +2377,19 @@ def test_principal_regions():
     ]
 
     print()
-    print("=" * 70)
-    print("MOHR-COULOMB PRINCIPAL RETURN TEST")
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "MOHR-COULOMB PRINCIPAL "
+        "RETURN TEST"
+    )
+
+    print(
+        "=" * 70
+    )
 
     for (
         expected_region,
@@ -1250,7 +2413,10 @@ def test_principal_regions():
         )
 
         print()
-        print("-" * 70)
+
+        print(
+            "-" * 70
+        )
 
         print(
             "Trial stress :",
@@ -1264,27 +2430,36 @@ def test_principal_regions():
 
         print(
             "Calculated   :",
-            result["region"],
+            result[
+                "region"
+            ],
         )
 
         print(
             "New stress   :",
-            result["stress"],
+            result[
+                "stress"
+            ],
         )
 
         assert (
-            result["region"]
+            result[
+                "region"
+            ]
             == expected_region
         )
 
     print()
+
     print(
-        "ALL PRINCIPAL RETURN TESTS PASSED"
+        "ALL PRINCIPAL RETURN "
+        "TESTS PASSED"
     )
 
 
 # ============================================================
-# 14. ANALYTIC vs NUMERICAL TANGENT TEST
+# 19. TEST:
+# PRINCIPAL ANALYTIC vs NUMERICAL TANGENT
 # ============================================================
 
 def test_principal_tangent():
@@ -1296,22 +2471,11 @@ def test_principal_tangent():
     phi = 30.0
     psi = 0.0
 
-    # --------------------------------------------------------
-    # Old stress
-    # --------------------------------------------------------
-
     stress_old = np.array([
         100.0,
         100.0,
         100.0,
     ])
-
-    # --------------------------------------------------------
-    # We deliberately choose a trial stress that returns
-    # to the INTERIOR OF A FACE.
-    #
-    # This avoids edge non-smoothness.
-    # --------------------------------------------------------
 
     target_trial = np.array([
         400.0,
@@ -1325,20 +2489,15 @@ def test_principal_tangent():
     )
 
     # --------------------------------------------------------
-    # Find strain increment that produces target_trial
-    #
-    # target_trial =
-    # stress_old + Dp dstrain
+    # Determine strain increment that produces
+    # the selected target trial stress.
     # --------------------------------------------------------
 
     dstrain = np.linalg.solve(
         Dp,
-        target_trial - stress_old,
+        target_trial
+        - stress_old,
     )
-
-    # --------------------------------------------------------
-    # Constitutive update
-    # --------------------------------------------------------
 
     result = (
         principal_stress_update(
@@ -1353,17 +2512,17 @@ def test_principal_tangent():
     )
 
     assert (
-        result["region"]
+        result[
+            "region"
+        ]
         == "face"
     )
 
-    Danalytic = result[
-        "tangent_principal"
-    ]
-
-    # --------------------------------------------------------
-    # Numerical tangent
-    # --------------------------------------------------------
+    Danalytic = (
+        result[
+            "tangent_principal"
+        ]
+    )
 
     Dnumerical = (
         numerical_principal_tangent(
@@ -1384,31 +2543,34 @@ def test_principal_tangent():
     )
 
     print()
-    print("=" * 70)
+
     print(
-        "PRINCIPAL TANGENT VERIFICATION"
+        "=" * 70
     )
-    print("=" * 70)
+
+    print(
+        "PRINCIPAL TANGENT "
+        "VERIFICATION"
+    )
+
+    print(
+        "=" * 70
+    )
 
     print()
-    print(
-        "Strain increment:"
-    )
 
-    print(
-        dstrain
-    )
-
-    print()
     print(
         "Region:"
     )
 
     print(
-        result["region"]
+        result[
+            "region"
+        ]
     )
 
     print()
+
     print(
         "Analytic tangent:"
     )
@@ -1418,6 +2580,7 @@ def test_principal_tangent():
     )
 
     print()
+
     print(
         "Numerical tangent:"
     )
@@ -1427,6 +2590,7 @@ def test_principal_tangent():
     )
 
     print()
+
     print(
         "Difference:"
     )
@@ -1434,10 +2598,6 @@ def test_principal_tangent():
     print(
         difference
     )
-
-    # --------------------------------------------------------
-    # Compare
-    # --------------------------------------------------------
 
     assert np.allclose(
         Danalytic,
@@ -1447,14 +2607,713 @@ def test_principal_tangent():
     )
 
     print()
+
     print(
         "ANALYTIC AND NUMERICAL "
+        "PRINCIPAL TANGENTS MATCH"
+    )
+
+
+# ============================================================
+# 20. TEST:
+# CARTESIAN FACE TANGENT
+# ============================================================
+
+def test_cartesian_face_tangent():
+
+    E = 30_000.0
+    nu = 0.30
+
+    c = 10.0
+    phi = 30.0
+    psi = 0.0
+
+    stress_old = np.array([
+        100.0,
+        100.0,
+        100.0,
+        0.0,
+        0.0,
+        0.0,
+    ])
+
+    # --------------------------------------------------------
+    # Includes shear so the principal axes rotate.
+    # --------------------------------------------------------
+
+    dstrain = np.array([
+         0.0100,
+        -0.0020,
+        -0.0030,
+         0.0030,
+         0.0000,
+         0.0000,
+    ])
+
+    result = stress_update(
+        stress_old,
+        dstrain,
+        E,
+        nu,
+        c,
+        phi,
+        psi,
+    )
+
+    assert (
+        result[
+            "region"
+        ]
+        == "face"
+    )
+
+    Danalytic = (
+        result[
+            "tangent"
+        ]
+    )
+
+    Dnumerical = (
+        numerical_cartesian_tangent(
+            stress_old,
+            dstrain,
+            E,
+            nu,
+            c,
+            phi,
+            psi,
+            h=1e-7,
+        )
+    )
+
+    difference = (
+        Danalytic
+        - Dnumerical
+    )
+
+    print()
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "CARTESIAN FACE "
+        "TANGENT VERIFICATION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print()
+
+    print(
+        "Region:"
+    )
+
+    print(
+        result[
+            "region"
+        ]
+    )
+
+    print()
+
+    print(
+        "Tangent mode:"
+    )
+
+    print(
+        result[
+            "tangent_mode"
+        ]
+    )
+
+    print()
+
+    print(
+        "Analytic Cartesian tangent:"
+    )
+
+    print(
+        Danalytic
+    )
+
+    print()
+
+    print(
+        "Numerical Cartesian tangent:"
+    )
+
+    print(
+        Dnumerical
+    )
+
+    print()
+
+    print(
+        "Difference:"
+    )
+
+    print(
+        difference
+    )
+
+    print()
+
+    print(
+        "Maximum absolute error:"
+    )
+
+    print(
+        np.max(
+            np.abs(
+                difference
+            )
+        )
+    )
+
+    assert np.allclose(
+        Danalytic,
+        Dnumerical,
+        rtol=1e-6,
+        atol=1e-3,
+    )
+
+    print()
+
+    print(
+        "ANALYTIC AND NUMERICAL "
+        "CARTESIAN FACE "
         "TANGENTS MATCH"
     )
 
 
 # ============================================================
-# 15. STRAIN-HISTORY TEST
+# 21. TEST:
+# COMPRESSION EDGE CARTESIAN TANGENT
+# ============================================================
+
+def test_compression_edge_cartesian_tangent():
+
+    E = 30_000.0
+    nu = 0.30
+
+    c = 10.0
+    phi = 30.0
+    psi = 0.0
+
+    stress_old = np.array([
+        100.0,
+        100.0,
+        100.0,
+        0.0,
+        0.0,
+        0.0,
+    ])
+
+    D = elastic_matrix_3d(
+        E,
+        nu,
+    )
+
+    # --------------------------------------------------------
+    # Distinct TRIAL principal stresses.
+    #
+    # Corrected result will lie on:
+    #
+    # sigma2 = sigma3
+    # --------------------------------------------------------
+
+    principal_trial_target = (
+        np.array([
+            600.0,
+            120.0,
+            100.0,
+        ])
+    )
+
+    # --------------------------------------------------------
+    # Rotate trial principal axes by 20 degrees
+    # about the z-axis.
+    # --------------------------------------------------------
+
+    theta = np.radians(
+        20.0
+    )
+
+    Q = np.array([
+        [
+            np.cos(theta),
+            -np.sin(theta),
+            0.0,
+        ],
+
+        [
+            np.sin(theta),
+            np.cos(theta),
+            0.0,
+        ],
+
+        [
+            0.0,
+            0.0,
+            1.0,
+        ],
+    ])
+
+    trial_tensor = (
+        Q
+        @ np.diag(
+            principal_trial_target
+        )
+        @ Q.T
+    )
+
+    target_trial = (
+        stress_tensor_to_vector(
+            trial_tensor
+        )
+    )
+
+    # --------------------------------------------------------
+    # Determine dstrain such that:
+    #
+    # sigma_trial =
+    # sigma_old + D dstrain
+    # --------------------------------------------------------
+
+    dstrain = np.linalg.solve(
+        D,
+        target_trial
+        - stress_old,
+    )
+
+    result = stress_update(
+        stress_old,
+        dstrain,
+        E,
+        nu,
+        c,
+        phi,
+        psi,
+    )
+
+    assert (
+        result[
+            "region"
+        ]
+        == "compression_edge"
+    )
+
+    Danalytic = (
+        result[
+            "tangent"
+        ]
+    )
+
+    Dnumerical = (
+        same_region_numerical_cartesian_tangent(
+            stress_old,
+            dstrain,
+            E,
+            nu,
+            c,
+            phi,
+            psi,
+            h=1e-7,
+        )
+    )
+
+    valid = (
+        ~np.isnan(
+            Dnumerical
+        )
+    )
+
+    difference = np.where(
+        valid,
+        Danalytic
+        - Dnumerical,
+        np.nan,
+    )
+
+    print()
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "COMPRESSION EDGE "
+        "TANGENT TEST"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print()
+
+    print(
+        "Trial principal stress:"
+    )
+
+    print(
+        result[
+            "principal_trial"
+        ]
+    )
+
+    print()
+
+    print(
+        "Corrected principal stress:"
+    )
+
+    print(
+        result[
+            "principal_new"
+        ]
+    )
+
+    print()
+
+    print(
+        "Tangent mode:"
+    )
+
+    print(
+        result[
+            "tangent_mode"
+        ]
+    )
+
+    print()
+
+    print(
+        "Analytic tangent:"
+    )
+
+    print(
+        Danalytic
+    )
+
+    print()
+
+    print(
+        "Same-region numerical tangent:"
+    )
+
+    print(
+        Dnumerical
+    )
+
+    print()
+
+    print(
+        "Difference:"
+    )
+
+    print(
+        difference
+    )
+
+    if np.all(
+        valid
+    ):
+
+        assert np.allclose(
+            Danalytic,
+            Dnumerical,
+            rtol=1e-5,
+            atol=1e-2,
+        )
+
+        print()
+
+        print(
+            "COMPRESSION EDGE "
+            "TANGENT MATCHES"
+        )
+
+    else:
+
+        print()
+
+        print(
+            "Some perturbation "
+            "directions crossed an "
+            "active-set boundary."
+        )
+
+
+# ============================================================
+# 22. TEST:
+# EXTENSION EDGE CARTESIAN TANGENT
+# ============================================================
+
+def test_extension_edge_cartesian_tangent():
+
+    E = 30_000.0
+    nu = 0.30
+
+    c = 10.0
+    phi = 30.0
+    psi = 0.0
+
+    stress_old = np.array([
+        100.0,
+        100.0,
+        100.0,
+        0.0,
+        0.0,
+        0.0,
+    ])
+
+    D = elastic_matrix_3d(
+        E,
+        nu,
+    )
+
+    # --------------------------------------------------------
+    # Distinct trial principal stresses.
+    #
+    # Corrected result will lie on:
+    #
+    # sigma1 = sigma2
+    # --------------------------------------------------------
+
+    principal_trial_target = (
+        np.array([
+            400.0,
+            390.0,
+            100.0,
+        ])
+    )
+
+    theta = np.radians(
+        20.0
+    )
+
+    Q = np.array([
+        [
+            np.cos(theta),
+            -np.sin(theta),
+            0.0,
+        ],
+
+        [
+            np.sin(theta),
+            np.cos(theta),
+            0.0,
+        ],
+
+        [
+            0.0,
+            0.0,
+            1.0,
+        ],
+    ])
+
+    trial_tensor = (
+        Q
+        @ np.diag(
+            principal_trial_target
+        )
+        @ Q.T
+    )
+
+    target_trial = (
+        stress_tensor_to_vector(
+            trial_tensor
+        )
+    )
+
+    dstrain = np.linalg.solve(
+        D,
+        target_trial
+        - stress_old,
+    )
+
+    result = stress_update(
+        stress_old,
+        dstrain,
+        E,
+        nu,
+        c,
+        phi,
+        psi,
+    )
+
+    assert (
+        result[
+            "region"
+        ]
+        == "extension_edge"
+    )
+
+    Danalytic = (
+        result[
+            "tangent"
+        ]
+    )
+
+    Dnumerical = (
+        same_region_numerical_cartesian_tangent(
+            stress_old,
+            dstrain,
+            E,
+            nu,
+            c,
+            phi,
+            psi,
+            h=1e-7,
+        )
+    )
+
+    valid = (
+        ~np.isnan(
+            Dnumerical
+        )
+    )
+
+    difference = np.where(
+        valid,
+        Danalytic
+        - Dnumerical,
+        np.nan,
+    )
+
+    print()
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "EXTENSION EDGE "
+        "TANGENT TEST"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print()
+
+    print(
+        "Trial principal stress:"
+    )
+
+    print(
+        result[
+            "principal_trial"
+        ]
+    )
+
+    print()
+
+    print(
+        "Corrected principal stress:"
+    )
+
+    print(
+        result[
+            "principal_new"
+        ]
+    )
+
+    print()
+
+    print(
+        "Tangent mode:"
+    )
+
+    print(
+        result[
+            "tangent_mode"
+        ]
+    )
+
+    print()
+
+    print(
+        "Analytic tangent:"
+    )
+
+    print(
+        Danalytic
+    )
+
+    print()
+
+    print(
+        "Same-region numerical tangent:"
+    )
+
+    print(
+        Dnumerical
+    )
+
+    print()
+
+    print(
+        "Difference:"
+    )
+
+    print(
+        difference
+    )
+
+    if np.all(
+        valid
+    ):
+
+        max_error = np.max(
+            np.abs(
+                difference
+            )
+        )
+
+        print()
+
+        print(
+            "Maximum absolute error:"
+        )
+
+        print(
+            max_error
+        )
+
+        assert np.allclose(
+            Danalytic,
+            Dnumerical,
+            rtol=1e-5,
+            atol=1e-2,
+        )
+
+        print()
+
+        print(
+            "EXTENSION EDGE "
+            "TANGENT MATCHES"
+        )
+
+    else:
+
+        print()
+
+        print(
+            "Some perturbation "
+            "directions crossed an "
+            "active-set boundary."
+        )
+
+
+# ============================================================
+# 23. STRAIN-HISTORY TEST
 # ============================================================
 
 def run_strain_history():
@@ -1467,7 +3326,7 @@ def run_strain_history():
     psi = 0.0
 
     # --------------------------------------------------------
-    # Initial hydrostatic stress
+    # Initial isotropic stress
     # --------------------------------------------------------
 
     stress = np.array([
@@ -1483,12 +3342,16 @@ def run_strain_history():
     # Axial strain increment
     # --------------------------------------------------------
 
-    deps_axial = 0.0005
+    deps_axial = (
+        0.0005
+    )
 
     dstrain = np.array([
         deps_axial,
-        -nu * deps_axial,
-        -nu * deps_axial,
+        -nu
+        * deps_axial,
+        -nu
+        * deps_axial,
         0.0,
         0.0,
         0.0,
@@ -1496,7 +3359,10 @@ def run_strain_history():
 
     history = []
 
-    # Add initial condition
+    # --------------------------------------------------------
+    # Initial condition
+    # --------------------------------------------------------
+
     history.append({
         "step":
             0,
@@ -1523,7 +3389,9 @@ def run_strain_history():
             "initial",
     })
 
-    total_axial_strain = 0.0
+    total_axial_strain = (
+        0.0
+    )
 
     # --------------------------------------------------------
     # Incremental loading
@@ -1535,29 +3403,52 @@ def run_strain_history():
     ):
 
         result = stress_update(
-            stress_old=stress,
-            dstrain=dstrain,
-            E=E,
-            nu=nu,
-            c=c,
-            phi=phi,
-            psi=psi,
+            stress_old=
+                stress,
+
+            dstrain=
+                dstrain,
+
+            E=
+                E,
+
+            nu=
+                nu,
+
+            c=
+                c,
+
+            phi=
+                phi,
+
+            psi=
+                psi,
         )
 
+        # ----------------------------------------------------
         # Accept corrected stress
+        # ----------------------------------------------------
+
         stress = (
-            result["stress"].copy()
+            result[
+                "stress"
+            ].copy()
         )
 
         total_axial_strain += (
             deps_axial
         )
 
-        principal = result[
-            "principal_new"
-        ]
+        principal = (
+            result[
+                "principal_new"
+            ]
+        )
 
-        p, q = (
+        (
+            p,
+            q,
+        ) = (
             stress_invariants_from_principal(
                 principal
             )
@@ -1586,14 +3477,16 @@ def run_strain_history():
                 q,
 
             "region":
-                result["region"],
+                result[
+                    "region"
+                ],
         })
 
     return history
 
 
 # ============================================================
-# 16. PRINT HISTORY
+# 24. PRINT STRAIN HISTORY
 # ============================================================
 
 def print_history(
@@ -1601,9 +3494,18 @@ def print_history(
 ):
 
     print()
-    print("=" * 105)
-    print("STRAIN HISTORY")
-    print("=" * 105)
+
+    print(
+        "=" * 105
+    )
+
+    print(
+        "STRAIN HISTORY"
+    )
+
+    print(
+        "=" * 105
+    )
 
     print(
         "Step   eps1       "
@@ -1612,7 +3514,9 @@ def print_history(
         "        region"
     )
 
-    print("-" * 105)
+    print(
+        "-" * 105
+    )
 
     for row in history:
 
@@ -1629,7 +3533,7 @@ def print_history(
 
 
 # ============================================================
-# 17. OPTIONAL PLOTTING
+# 25. OPTIONAL PLOTTING
 # ============================================================
 
 def plot_history(
@@ -1639,37 +3543,55 @@ def plot_history(
     import matplotlib.pyplot as plt
 
     axial_strain = np.array([
-        row["axial_strain"]
-        for row in history
+        row[
+            "axial_strain"
+        ]
+        for row
+        in history
     ])
 
     sigma1 = np.array([
-        row["sigma1"]
-        for row in history
+        row[
+            "sigma1"
+        ]
+        for row
+        in history
     ])
 
     sigma2 = np.array([
-        row["sigma2"]
-        for row in history
+        row[
+            "sigma2"
+        ]
+        for row
+        in history
     ])
 
     sigma3 = np.array([
-        row["sigma3"]
-        for row in history
+        row[
+            "sigma3"
+        ]
+        for row
+        in history
     ])
 
     p = np.array([
-        row["p"]
-        for row in history
+        row[
+            "p"
+        ]
+        for row
+        in history
     ])
 
     q = np.array([
-        row["q"]
-        for row in history
+        row[
+            "q"
+        ]
+        for row
+        in history
     ])
 
     # --------------------------------------------------------
-    # Principal stresses
+    # Principal stress - axial strain
     # --------------------------------------------------------
 
     plt.figure()
@@ -1730,150 +3652,9 @@ def plot_history(
 
     plt.show()
 
-def numerical_cartesian_tangent(
-    stress_old,
-    dstrain,
-    E,
-    nu,
-    c,
-    phi,
-    psi,
-    h=1e-7,
-):
-    """
-    Numerical 6x6 algorithmic tangent for the complete
-    Cartesian stress-update algorithm.
-
-    This derivative includes:
-        - principal stress changes
-        - principal direction changes
-        - return mapping
-
-    It is intended as a verification/reference tangent,
-    not as the final production tangent.
-    """
-
-    Dnum = np.zeros((6, 6))
-
-    for j in range(6):
-
-        dstrain_plus = dstrain.copy()
-        dstrain_minus = dstrain.copy()
-
-        dstrain_plus[j] += h
-        dstrain_minus[j] -= h
-
-        result_plus = stress_update(
-            stress_old=stress_old,
-            dstrain=dstrain_plus,
-            E=E,
-            nu=nu,
-            c=c,
-            phi=phi,
-            psi=psi,
-        )
-
-        result_minus = stress_update(
-            stress_old=stress_old,
-            dstrain=dstrain_minus,
-            E=E,
-            nu=nu,
-            c=c,
-            phi=phi,
-            psi=psi,
-        )
-
-        stress_plus = result_plus["stress"]
-        stress_minus = result_minus["stress"]
-
-        Dnum[:, j] = (
-            stress_plus
-            - stress_minus
-        ) / (2.0 * h)
-
-    return Dnum
-
-def test_cartesian_numerical_tangent():
-
-    E = 30_000.0
-    nu = 0.30
-
-    c = 10.0
-    phi = 30.0
-    psi = 0.0
-
-    stress_old = np.array([
-        100.0,
-        100.0,
-        100.0,
-        0.0,
-        0.0,
-        0.0,
-    ])
-
-    # A strain increment containing both normal and shear parts.
-    # We want a non-trivial principal direction.
-    dstrain = np.array([
-         0.0100,
-        -0.0020,
-        -0.0030,
-         0.0030,
-         0.0000,
-         0.0000,
-    ])
-
-    result = stress_update(
-        stress_old=stress_old,
-        dstrain=dstrain,
-        E=E,
-        nu=nu,
-        c=c,
-        phi=phi,
-        psi=psi,
-    )
-
-    Dnum = numerical_cartesian_tangent(
-        stress_old=stress_old,
-        dstrain=dstrain,
-        E=E,
-        nu=nu,
-        c=c,
-        phi=phi,
-        psi=psi,
-        h=1e-7,
-    )
-
-    print()
-    print("=" * 70)
-    print("CARTESIAN NUMERICAL TANGENT")
-    print("=" * 70)
-
-    print()
-    print("Region:")
-    print(result["region"])
-
-    print()
-    print("Trial Cartesian stress:")
-    print(result["stress_trial"])
-
-    print()
-    print("Trial principal stress:")
-    print(result["principal_trial"])
-
-    print()
-    print("Corrected principal stress:")
-    print(result["principal_new"])
-
-    print()
-    print("Corrected Cartesian stress:")
-    print(result["stress"])
-
-    print()
-    print("Numerical Cartesian tangent:")
-    print(Dnum)
 
 # ============================================================
-# 18. MAIN
+# 26. MAIN
 # ============================================================
 
 if __name__ == "__main__":
@@ -1884,22 +3665,46 @@ if __name__ == "__main__":
     )
 
     # --------------------------------------------------------
-    # Test 1:
-    # elastic / face / edges / apex
+    # TEST 1:
+    # Elastic / face / compression edge /
+    # extension edge / apex
     # --------------------------------------------------------
 
     test_principal_regions()
 
     # --------------------------------------------------------
-    # Test 2:
-    # analytic vs numerical tangent
+    # TEST 2:
+    # Principal analytic tangent
+    # versus numerical principal tangent
     # --------------------------------------------------------
 
     test_principal_tangent()
 
     # --------------------------------------------------------
-    # Test 3:
-    # incremental strain history
+    # TEST 3:
+    # Full Cartesian spectral tangent
+    # for a face return
+    # --------------------------------------------------------
+
+    test_cartesian_face_tangent()
+
+    # --------------------------------------------------------
+    # TEST 4:
+    # Compression-edge Cartesian tangent
+    # --------------------------------------------------------
+
+    test_compression_edge_cartesian_tangent()
+
+    # --------------------------------------------------------
+    # TEST 5:
+    # Extension-edge Cartesian tangent
+    # --------------------------------------------------------
+
+    test_extension_edge_cartesian_tangent()
+
+    # --------------------------------------------------------
+    # TEST 6:
+    # Incremental strain history
     # --------------------------------------------------------
 
     history = (
@@ -1910,8 +3715,11 @@ if __name__ == "__main__":
         history
     )
 
-    # Optional
-    plot_history(
-        history
-    )
-    test_cartesian_numerical_tangent()
+    # --------------------------------------------------------
+    # OPTIONAL:
+    # Uncomment for plots
+    # --------------------------------------------------------
+
+    # plot_history(
+    #     history
+    # )

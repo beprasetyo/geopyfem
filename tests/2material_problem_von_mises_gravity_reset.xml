@@ -172,7 +172,7 @@
       <!-- Relative to this XML file -->
       <Directory>results</Directory>
 
-      <BaseName>2material_von_mises_gravity_reset</BaseName>
+      <BaseName>2material_von_mises_gravity_reset_test</BaseName>
 
       <!-- Keep the exact integration-point database -->
       <WriteGaussPoints>true</WriteGaussPoints>
@@ -180,7 +180,7 @@
     </VTK>
 
     <!-- Optional quick/debug plot -->
-    <Matplotlib enabled="true"/>
+    <Matplotlib enabled="false"/>
 
     <!-- Used only when Matplotlib is enabled -->
     <Displacement>uy</Displacement>
