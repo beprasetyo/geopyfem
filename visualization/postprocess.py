@@ -206,10 +206,18 @@ def principal_stresses(stress_tensor):
     """
     Return:
         [sigma1, sigma2, sigma3]
-    with mathematical ordering:
-        sigma1 >= sigma2 >= sigma3.
 
-    Current GeoPyFEM sign convention is tension-positive.
+    using the geotechnical / PLAXIS-style ordering:
+
+        sigma1 <= sigma2 <= sigma3
+
+    GeoPyFEM keeps the tension-positive stress sign convention. Therefore:
+
+        sigma1 = most compressive principal stress
+        sigma3 = least compressive / most tensile principal stress
+
+    ``numpy.linalg.eigvalsh`` already returns eigenvalues in ascending
+    algebraic order, so no reversal is required.
     """
     stress_tensor = np.asarray(
         stress_tensor,
@@ -221,9 +229,9 @@ def principal_stresses(stress_tensor):
             "principal_stresses() requires a 3x3 stress tensor."
         )
 
-    values = np.linalg.eigvalsh(stress_tensor)
-
-    sigma3, sigma2, sigma1 = values
+    sigma1, sigma2, sigma3 = np.linalg.eigvalsh(
+        stress_tensor
+    )
 
     return np.array([
         sigma1,
@@ -1161,7 +1169,7 @@ def print_element_gauss_results(
     )
     print("Stress sign     : tension positive")
     print(
-        "Principal order : sigma1 >= sigma2 >= sigma3"
+        "Principal order : sigma1 <= sigma2 <= sigma3"
     )
 
     printed = 0
