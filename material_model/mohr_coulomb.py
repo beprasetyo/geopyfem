@@ -39,20 +39,22 @@ class MohrCoulomb(ConstitutiveModel):
     - face
     - compression_edge: sigma1 > sigma2 = sigma3
     - extension_edge:   sigma1 = sigma2 > sigma3
-    - apex_projection (optional pedagogical mode only)
+    - apex_fortran: direct apex projection with the modified single-singular
+      apex tangent used by the reference Fortran implementation
+    - apex_projection: retained as a legacy zero-tangent diagnostic mode
 
     Tangent
     -------
     - elastic: exact plane-strain elastic tangent
     - plastic, distinct trial principal stresses: analytic spectral tangent
+    - apex_fortran: modified single-singular apex tangent (Fortran style)
     - repeated/nearly repeated trial principal stresses: numerical 2-D
       tangent fallback from the same local constitutive map
 
     Important limitations
     ---------------------
-    - The non-associated apex return is not yet considered production-ready.
-      By default apex entry raises NotImplementedError.  Set
-      ``apex_mode='projection'`` only for controlled pedagogical testing.
+    - The Fortran-style apex treatment is a modified tangent regularisation,
+      not an exact three-surface non-associated apex active-set solution.
     - The repeated-eigenvalue tangent uses numerical differentiation rather
       than the closed-form limiting spectral derivative.
     - Perfect plasticity only: no cohesion/friction hardening or softening.
@@ -101,8 +103,11 @@ class MohrCoulomb(ConstitutiveModel):
         )
 
         self.apex_mode = str(
-            parameters.get("apex_mode", "error")
+            parameters.get("apex_mode", "fortran")
         ).strip().lower()
+        self.apex_alpha = float(
+            parameters.get("apex_alpha", 17.0)
+        )
 
         self._validate_parameters()
 
@@ -195,9 +200,15 @@ class MohrCoulomb(ConstitutiveModel):
                 "MohrCoulomb yield_tolerance_factor must be positive."
             )
 
-        if self.apex_mode not in {"error", "projection"}:
+        if self.apex_mode not in {"fortran", "error", "projection"}:
             raise ValueError(
-                "MohrCoulomb apex_mode must be 'error' or 'projection'."
+                "MohrCoulomb apex_mode must be 'fortran', 'error', "
+                "or 'projection'."
+            )
+
+        if self.apex_alpha <= 0.0:
+            raise ValueError(
+                "MohrCoulomb apex_alpha must be positive."
             )
 
     # =========================================================================
@@ -390,6 +401,86 @@ class MohrCoulomb(ConstitutiveModel):
 
         return stress_new, dstrain_p, dlambda, Dalg_principal, H
 
+    @staticmethod
+    def _form_dep_perfect(D, normal, flow_direction):
+        """Perfect-plastic tangent for one active direction.
+
+        This is the GeoPyFEM equivalent of the reference Fortran
+        ``FormDepPerfect`` routine.  For ``normal == flow_direction`` it
+        produces a symmetric tangent that is singular in that direction.
+        """
+        D = np.asarray(D, dtype=float)
+        normal = np.asarray(normal, dtype=float).reshape(-1)
+        flow_direction = np.asarray(flow_direction, dtype=float).reshape(-1)
+
+        Dg = D @ flow_direction
+        fD = normal @ D
+        denominator = float(normal @ Dg)
+
+        scale = max(
+            1.0,
+            float(np.linalg.norm(normal)),
+            float(np.linalg.norm(flow_direction)),
+            float(np.linalg.norm(D, ord=2)),
+        )
+        if abs(denominator) <= np.finfo(float).eps * scale:
+            raise np.linalg.LinAlgError(
+                "Degenerate direction in MohrCoulomb._form_dep_perfect()."
+            )
+
+        return D - np.outer(Dg, fD) / denominator
+
+    def _fortran_apex_return(self, stress_trial, p_apex, f13_trial):
+        """Direct apex projection plus modified single-singular tangent.
+
+        Mirrors the default apex treatment of the reference Fortran code:
+
+        - project all three principal stresses to the apex;
+        - form the plastic-corrector stress ``SiPla``;
+        - map it through the elastic normal compliance to obtain the Koiter
+          direction;
+        - form a single-singular perfect-plastic tangent in that direction;
+        - divide the tangent by ``apex_alpha`` (Fortran default: 17).
+
+        No unique set of apex plastic multipliers exists in this modified
+        treatment, so ``dlambda`` remains empty.
+        """
+        stress_trial = np.asarray(stress_trial, dtype=float).reshape(3)
+        stress_new = np.full(3, float(p_apex), dtype=float)
+
+        # Fortran: SiPla = SigP - SigP_up
+        correction_stress = stress_trial - stress_new
+
+        Cp_inv = np.linalg.inv(self._Cp)
+
+        # Fortran: KoitDir = Dninv * SiPla
+        koiter_direction = Cp_inv @ correction_stress
+
+        if float(koiter_direction @ koiter_direction) > 0.0:
+            Dnorm = self._form_dep_perfect(
+                self._Cp,
+                koiter_direction,
+                koiter_direction,
+            )
+            Dalg_principal = Dnorm / self.apex_alpha
+            H = Dalg_principal @ Cp_inv
+        else:
+            Dalg_principal = np.zeros((3, 3), dtype=float)
+            H = np.zeros((3, 3), dtype=float)
+
+        return {
+            "stress": stress_new,
+            "region": "apex_fortran",
+            "yielded": True,
+            "plastic_strain_increment_principal": koiter_direction,
+            "dlambda": np.zeros(0, dtype=float),
+            "tangent_principal": Dalg_principal,
+            "principal_jacobian": H,
+            "yield_function_trial": float(f13_trial),
+            "apex_correction_stress_principal": correction_stress,
+            "apex_koiter_direction_principal": koiter_direction,
+        }
+
     def _principal_return(self, stress_trial):
         (
             a13,
@@ -483,7 +574,8 @@ class MohrCoulomb(ConstitutiveModel):
                 "yield_function_trial": float(f13_trial),
             }
 
-        # Pedagogical geometric apex projection.
+        # Apex return.  The stress projection is the same closed-form apex
+        # projection used by the reference Fortran implementation.
         if self.friction_angle <= 0.0:
             raise NotImplementedError(
                 "MohrCoulomb reached the apex branch with phi=0. "
@@ -493,16 +585,30 @@ class MohrCoulomb(ConstitutiveModel):
         phi = np.radians(self.friction_angle)
         p_apex = -self.cohesion / np.tan(phi)
 
-        return {
-            "stress": np.array([p_apex, p_apex, p_apex], dtype=float),
-            "region": "apex_projection",
-            "yielded": True,
-            "plastic_strain_increment_principal": None,
-            "dlambda": np.zeros(0, dtype=float),
-            "tangent_principal": np.zeros((3, 3), dtype=float),
-            "principal_jacobian": np.zeros((3, 3), dtype=float),
-            "yield_function_trial": float(f13_trial),
-        }
+        if self.apex_mode == "error":
+            raise NotImplementedError(
+                "MohrCoulomb entered the apex region while apex_mode='error'."
+            )
+
+        if self.apex_mode == "projection":
+            # Legacy diagnostic mode: geometric projection with zero tangent
+            # and no plastic-strain increment.
+            return {
+                "stress": np.array([p_apex, p_apex, p_apex], dtype=float),
+                "region": "apex_projection",
+                "yielded": True,
+                "plastic_strain_increment_principal": None,
+                "dlambda": np.zeros(0, dtype=float),
+                "tangent_principal": np.zeros((3, 3), dtype=float),
+                "principal_jacobian": np.zeros((3, 3), dtype=float),
+                "yield_function_trial": float(f13_trial),
+            }
+
+        return self._fortran_apex_return(
+            stress_trial=stress_trial,
+            p_apex=p_apex,
+            f13_trial=f13_trial,
+        )
 
     # =========================================================================
     # SPECTRAL TANGENT
@@ -578,6 +684,43 @@ class MohrCoulomb(ConstitutiveModel):
 
         return Dcart
 
+    def _apex_cartesian_tangent_6d(
+        self,
+        directions,
+        H,
+    ):
+        """Rotate the modified Fortran-style apex tangent to Cartesian form.
+
+        At the apex all updated principal stresses are equal.  The reference
+        Fortran algorithm therefore nulls the spectral shear contribution via
+        its principal-space modification matrix ``T``.  This routine applies
+        only the modified principal normal tangent and sets those spectral
+        shear terms to zero, avoiding divisions by repeated principal stresses.
+        """
+        directions = np.asarray(directions, dtype=float).reshape(3, 3)
+        H = np.asarray(H, dtype=float).reshape(3, 3)
+        Dcart = np.zeros((6, 6), dtype=float)
+
+        for j in range(6):
+            deps = np.zeros(6, dtype=float)
+            deps[j] = 1.0
+
+            dstress_trial_vec = self._C6 @ deps
+            dstress_trial_tensor = self._stress_voigt6_to_tensor(
+                dstress_trial_vec
+            )
+            dtrial_tensor_p = (
+                directions.T @ dstress_trial_tensor @ directions
+            )
+
+            dnew_diag = H @ np.diag(dtrial_tensor_p)
+            dnew_tensor_p = np.diag(dnew_diag)
+
+            dnew_cart = directions @ dnew_tensor_p @ directions.T
+            Dcart[:, j] = self._stress_tensor_to_voigt6(dnew_cart)
+
+        return Dcart
+
     # =========================================================================
     # LOCAL STRESS INTEGRATION
     # =========================================================================
@@ -610,15 +753,6 @@ class MohrCoulomb(ConstitutiveModel):
 
         result = self._principal_return(principal_trial_cp)
 
-        if result["region"] == "apex_projection" and self.apex_mode == "error":
-            raise NotImplementedError(
-                "MohrCoulomb entered the non-associated apex region. "
-                "The current GeoPyFEM MC implementation intentionally stops "
-                "here because the production apex algorithm has not yet been "
-                "implemented. Use apex_mode='projection' only for controlled "
-                "pedagogical tests."
-            )
-
         principal_new_cp = result["stress"]
         stress_new_cp = self._principal_to_cartesian(
             principal_new_cp,
@@ -631,9 +765,11 @@ class MohrCoulomb(ConstitutiveModel):
         self._set_effective_stress(trial_state, stress_new_tp)
         trial_state.yielded = bool(result["yielded"])
 
-        # Accumulate plastic strain only for branches with a defined
-        # non-associated flow increment.  The pedagogical apex projection is
-        # deliberately not assigned a fictitious flow-rule plastic strain.
+        # Accumulate plastic strain for branches with a defined increment.
+        # For the Fortran-style apex treatment this increment is the Koiter
+        # direction obtained from elastic compliance times the correction
+        # stress, matching the reference algorithm.  The legacy geometric
+        # projection mode deliberately leaves the increment undefined.
         deps_p_principal_cp = result["plastic_strain_increment_principal"]
         if result["yielded"] and deps_p_principal_cp is not None:
             deps_p_tensor_cp = (
@@ -685,6 +821,23 @@ class MohrCoulomb(ConstitutiveModel):
         trial_state.internal_variables["principal_jacobian"] = result[
             "principal_jacobian"
         ].copy()
+
+        if "apex_correction_stress_principal" in result:
+            trial_state.internal_variables[
+                "apex_correction_stress_principal"
+            ] = np.asarray(
+                result["apex_correction_stress_principal"],
+                dtype=float,
+            ).copy()
+            trial_state.internal_variables[
+                "apex_koiter_direction_principal"
+            ] = np.asarray(
+                result["apex_koiter_direction_principal"],
+                dtype=float,
+            ).copy()
+            trial_state.internal_variables["apex_alpha"] = float(
+                self.apex_alpha
+            )
 
         return trial_state
 
@@ -759,9 +912,30 @@ class MohrCoulomb(ConstitutiveModel):
             C_alg_2d = self._C_plane_strain.copy()
 
         elif region == "apex_projection":
-            # Only reachable when apex_mode='projection'.
+            # Legacy diagnostic mode only.
             C_alg_2d = np.zeros((3, 3), dtype=float)
-            tangent_mode = "apex_zero_pedagogical"
+            tangent_mode = "apex_zero_legacy_projection"
+
+        elif region == "apex_fortran":
+            directions = np.asarray(
+                trial_state.internal_variables["principal_directions"],
+                dtype=float,
+            )
+            H = np.asarray(
+                trial_state.internal_variables["principal_jacobian"],
+                dtype=float,
+            )
+            C_alg_6d = self._apex_cartesian_tangent_6d(
+                directions=directions,
+                H=H,
+            )
+            C_alg_2d = C_alg_6d[
+                np.ix_(
+                    self._PLANE_STRAIN_INDICES,
+                    self._PLANE_STRAIN_INDICES,
+                )
+            ].copy()
+            tangent_mode = "fortran_modified_apex_single_singular"
 
         else:
             principal_trial_cp = np.asarray(
