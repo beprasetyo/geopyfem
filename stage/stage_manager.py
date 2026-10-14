@@ -293,6 +293,11 @@ class StageManager:
                     "k0"
                 )
             ),
+            "strength_reduction": deepcopy(
+                stage.get(
+                    "strength_reduction"
+                )
+            ),
             "reset_displacements": bool(
                 stage.get(
                     "reset_displacements",

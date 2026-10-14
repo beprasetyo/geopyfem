@@ -205,12 +205,52 @@
       </DeactivateRegions>
     </Stage>
 
+    <Stage id="4" name="Safety">
+      <Procedure>safety</Procedure>
+
+      <StrengthReduction>
+        <InitialFactor>1.0</InitialFactor>
+        <InitialFactorIncrement>0.01</InitialFactorIncrement>
+        <MaximumFactor>3.0</MaximumFactor>
+        <MaximumSteps>150</MaximumSteps>
+
+        <ArcLength>
+          <MinimumRadiusFactor>0.05</MinimumRadiusFactor>
+          <MaximumRadiusFactor>2.0</MaximumRadiusFactor>
+
+          <CutbackFactor>0.50</CutbackFactor>
+          <MaximumCutbacks>50</MaximumCutbacks>
+          <GrowthFactor>1.15</GrowthFactor>
+
+          <FastConvergenceIterations>4</FastConvergenceIterations>
+          <SlowConvergenceIterations>10</SlowConvergenceIterations>
+
+          <FactorWeight>1.0</FactorWeight>
+          <DisplacementScaleFactor>1.0</DisplacementScaleFactor>
+
+          <SensitivityRelativeStep>1.0e-4</SensitivityRelativeStep>
+          <SensitivityMinimumStep>1.0e-6</SensitivityMinimumStep>
+
+          <ConstraintTolerance>1.0e-7</ConstraintTolerance>
+          <CorrectionTolerance>1.0e-7</CorrectionTolerance>
+        </ArcLength>
+
+        <FailureDetection>
+          <WindowSteps>12</WindowSteps>
+          <FactorRangeTolerance>0.005</FactorRangeTolerance>
+          <DisplacementGrowthRatio>0.05</DisplacementGrowthRatio>
+          <MinimumDisplacementRatio>0.001</MinimumDisplacementRatio>
+        </FailureDetection>
+
+      </StrengthReduction>
+    </Stage>
+
   </Stages>
 
   <Output>
     <VTK enabled="true">
       <Directory>results</Directory>
-      <BaseName>excavation_k0_load_release_mc_yield3</BaseName>
+      <BaseName>excavation_k0_load_release_mc_yield_SRFarc</BaseName>
       <WriteGaussPoints>true</WriteGaussPoints>
     </VTK>
     <Matplotlib enabled="false"/>

@@ -89,6 +89,14 @@ class MohrCoulomb(ConstitutiveModel):
             default=0.0,
         )
 
+        # Reference strength is immutable input data for phi-c reduction.
+        # Safety factors are always applied relative to these ORIGINAL values,
+        # never compounded from an already reduced material state.
+        self.reference_cohesion = float(self.cohesion)
+        self.reference_friction_angle = float(self.friction_angle)
+        self.reference_dilation_angle = float(self.dilation_angle)
+        self.strength_reduction_factor = 1.0
+
         density = parameters.get("density")
         self.density = None if density is None else float(density)
 
@@ -210,6 +218,62 @@ class MohrCoulomb(ConstitutiveModel):
             raise ValueError(
                 "MohrCoulomb apex_alpha must be positive."
             )
+
+    # =========================================================================
+    # PHI-C STRENGTH REDUCTION INTERFACE
+    # =========================================================================
+
+    def set_strength_reduction_factor(self, factor):
+        """Apply one absolute phi-c reduction factor.
+
+        GeoPyFEM follows the conventional strength-reduction definition:
+
+            c_reduced = c_input / F
+            tan(phi_reduced) = tan(phi_input) / F
+
+        The dilation angle is intentionally left unchanged.  In particular,
+        the common geotechnical choice psi = 0 therefore remains zero during
+        the safety phase.
+        """
+        factor = float(factor)
+
+        if factor < 1.0:
+            raise ValueError(
+                "MohrCoulomb strength reduction factor must be >= 1.0."
+            )
+
+        phi0 = np.radians(self.reference_friction_angle)
+
+        self.cohesion = self.reference_cohesion / factor
+        self.friction_angle = np.degrees(
+            np.arctan(np.tan(phi0) / factor)
+        )
+        self.dilation_angle = self.reference_dilation_angle
+        self.strength_reduction_factor = factor
+
+    def restore_reference_strength(self):
+        """Restore the original input Mohr-Coulomb strength."""
+        self.cohesion = float(self.reference_cohesion)
+        self.friction_angle = float(self.reference_friction_angle)
+        self.dilation_angle = float(self.reference_dilation_angle)
+        self.strength_reduction_factor = 1.0
+
+    def strength_reduction_state(self):
+        """Return current/reference strength values for safety diagnostics."""
+        return {
+            "model": self.model_name,
+            "factor": float(self.strength_reduction_factor),
+            "reference_cohesion": float(self.reference_cohesion),
+            "reference_friction_angle": float(
+                self.reference_friction_angle
+            ),
+            "reference_dilation_angle": float(
+                self.reference_dilation_angle
+            ),
+            "cohesion": float(self.cohesion),
+            "friction_angle": float(self.friction_angle),
+            "dilation_angle": float(self.dilation_angle),
+        }
 
     # =========================================================================
     # COMMON GEOpyFEM STATE HELPERS
@@ -456,7 +520,24 @@ class MohrCoulomb(ConstitutiveModel):
         # Fortran: KoitDir = Dninv * SiPla
         koiter_direction = Cp_inv @ correction_stress
 
-        if float(koiter_direction @ koiter_direction) > 0.0:
+        # Near an already-corrected apex, roundoff can leave an extremely
+        # small but nonzero Koiter direction.  Treat that state as the exact
+        # zero-correction branch instead of sending a numerically degenerate
+        # direction to FormDepPerfect.  This is especially important during
+        # repeated safety-factor continuation close to collapse.
+        koiter_norm = float(np.linalg.norm(koiter_direction))
+        koiter_scale = max(
+            1.0,
+            float(np.linalg.norm(Cp_inv, ord=2))
+            * max(
+                float(np.linalg.norm(stress_trial)),
+                float(np.linalg.norm(stress_new)),
+                1.0,
+            ),
+        )
+        koiter_tolerance = np.sqrt(np.finfo(float).eps) * koiter_scale
+
+        if koiter_norm > koiter_tolerance:
             Dnorm = self._form_dep_perfect(
                 self._Cp,
                 koiter_direction,

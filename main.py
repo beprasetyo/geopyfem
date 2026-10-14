@@ -626,6 +626,80 @@ if stage_results:
 
     print("-" * 118)
 
+    safety_stage_results = [
+        item
+        for item in stage_results
+        if item.get("procedure") == "safety"
+    ]
+
+    for safety_result in safety_stage_results:
+        print()
+        print(
+            f"Safety stage {safety_result['stage_id']} status :",
+            safety_result.get("safety_status"),
+        )
+
+        if safety_result.get("safety_factor") is not None:
+            print(
+                "Safety factor (SigmaMsf) :",
+                f"{float(safety_result['safety_factor']):.6f}",
+            )
+        else:
+            print(
+                "Last converged SigmaMsf  :",
+                f"{float(safety_result.get('final_strength_reduction_factor', 1.0)):.6f}",
+            )
+
+        peak = safety_result.get(
+            "peak_strength_reduction_factor"
+        )
+        if peak is not None:
+            print(
+                "Peak SigmaMsf            :",
+                f"{float(peak):.6f}",
+            )
+
+        plateau = safety_result.get(
+            "plateau_strength_reduction_factor"
+        )
+        if plateau is not None:
+            print(
+                "Plateau mean SigmaMsf    :",
+                f"{float(plateau):.6f}",
+            )
+
+        plateau_range = safety_result.get(
+            "plateau_factor_range"
+        )
+        if plateau_range is not None:
+            print(
+                "Plateau SigmaMsf range   :",
+                f"{float(plateau_range[0]):.6f} - "
+                f"{float(plateau_range[1]):.6f}",
+            )
+
+        rejected = safety_result.get(
+            "last_failed_strength_reduction_factor"
+        )
+        if rejected is not None:
+            print(
+                "Last rejected SigmaMsf   :",
+                f"{float(rejected):.6f} (diagnostic only)",
+            )
+
+        safety_disp = safety_result.get(
+            "safety_displacement_metrics"
+        ) or {}
+        if "maximum_safety_displacement" in safety_disp:
+            print(
+                "Max safety displacement  :",
+                f"{float(safety_disp['maximum_safety_displacement']):.6e}",
+            )
+
+    if safety_stage_results:
+        print()
+        print("-" * 118)
+
     print(
         f"{'Total stages':<32}"
         f"{'':>12}"

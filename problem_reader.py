@@ -473,11 +473,139 @@ def _read_stages(root):
             ),
             "gravity": gravity,
             "k0": _read_stage_k0(stage),
+            "strength_reduction": _read_stage_strength_reduction(stage),
             "reset_displacements": reset_displacements,
         })
 
     return stages
 
+
+def _read_stage_strength_reduction(stage):
+    """Read optional arc-length phi-c strength-reduction settings.
+
+    Preferred XML
+    -------------
+    <StrengthReduction>
+      <InitialFactor>1.0</InitialFactor>
+      <InitialFactorIncrement>0.01</InitialFactorIncrement>
+      <MaximumFactor>3.0</MaximumFactor>
+      <MaximumSteps>150</MaximumSteps>
+
+      <ArcLength>
+        <MinimumRadiusFactor>0.05</MinimumRadiusFactor>
+        <MaximumRadiusFactor>2.0</MaximumRadiusFactor>
+        <CutbackFactor>0.50</CutbackFactor>
+        <MaximumCutbacks>50</MaximumCutbacks>
+        <GrowthFactor>1.15</GrowthFactor>
+        <FastConvergenceIterations>4</FastConvergenceIterations>
+        <SlowConvergenceIterations>10</SlowConvergenceIterations>
+        <FactorWeight>1.0</FactorWeight>
+        <DisplacementScaleFactor>1.0</DisplacementScaleFactor>
+        <SensitivityRelativeStep>1.0e-4</SensitivityRelativeStep>
+        <SensitivityMinimumStep>1.0e-6</SensitivityMinimumStep>
+        <ConstraintTolerance>1.0e-7</ConstraintTolerance>
+        <CorrectionTolerance>1.0e-7</CorrectionTolerance>
+      </ArcLength>
+
+      <FailureDetection>
+        <WindowSteps>12</WindowSteps>
+        <FactorRangeTolerance>0.005</FactorRangeTolerance>
+        <DisplacementGrowthRatio>0.50</DisplacementGrowthRatio>
+        <MinimumDisplacementRatio>1.0e-4</MinimumDisplacementRatio>
+      </FailureDetection>
+    </StrengthReduction>
+
+    The direct tags used by the first GeoPyFEM safety prototype are still
+    read as legacy aliases. stage/safety.py converts them to the new settings.
+    """
+    section = stage.find("StrengthReduction")
+    if section is None:
+        return None
+
+    settings = {}
+
+    direct_map = {
+        "InitialFactor": "initial_factor",
+        "InitialFactorIncrement": "initial_factor_increment",
+        "MaximumFactor": "maximum_factor",
+        "MaximumSteps": "maximum_steps",
+
+        # Legacy prototype aliases:
+        "InitialIncrement": "initial_increment",
+        "MinimumIncrement": "minimum_increment",
+        "MaximumIncrement": "maximum_increment",
+        "FactorTolerance": "factor_tolerance",
+        "PlateauRefinements": "plateau_refinements",
+        "PlateauDisplacementGrowthRatio": (
+            "plateau_displacement_growth_ratio"
+        ),
+    }
+
+    arc_section = section.find("ArcLength")
+    arc_map = {
+        "MinimumRadiusFactor": "minimum_radius_factor",
+        "MaximumRadiusFactor": "maximum_radius_factor",
+        "CutbackFactor": "cutback_factor",
+        "MaximumCutbacks": "maximum_cutbacks",
+        "GrowthFactor": "growth_factor",
+        "FastConvergenceIterations": "fast_convergence_iterations",
+        "SlowConvergenceIterations": "slow_convergence_iterations",
+        "FactorWeight": "factor_weight",
+        "DisplacementScaleFactor": "displacement_scale_factor",
+        "SensitivityRelativeStep": "sensitivity_relative_step",
+        "SensitivityMinimumStep": "sensitivity_minimum_step",
+        "ConstraintTolerance": "constraint_tolerance",
+        "CorrectionTolerance": "correction_tolerance",
+    }
+
+    failure_section = section.find("FailureDetection")
+    failure_map = {
+        "WindowSteps": "window_steps",
+        "FactorRangeTolerance": "factor_range_tolerance",
+        "DisplacementGrowthRatio": "displacement_growth_ratio",
+        "MinimumDisplacementRatio": "minimum_displacement_ratio",
+    }
+
+    # Also accept the arc settings as direct children for compact XML and
+    # backward compatibility with the first prototype.
+    direct_arc_compatibility = {
+        "CutbackFactor": "cutback_factor",
+        "MaximumCutbacks": "maximum_cutbacks",
+        "GrowthFactor": "growth_factor",
+        "FastConvergenceIterations": "fast_convergence_iterations",
+        "SlowConvergenceIterations": "slow_convergence_iterations",
+    }
+
+    integer_keys = {
+        "maximum_cutbacks",
+        "fast_convergence_iterations",
+        "slow_convergence_iterations",
+        "window_steps",
+        "maximum_steps",
+        "plateau_refinements",
+    }
+
+    def read_map(parent, mapping):
+        if parent is None:
+            return
+
+        for xml_tag, key in mapping.items():
+            value = _convert_number(_text(parent, xml_tag))
+            if value is None:
+                continue
+
+            settings[key] = (
+                int(value)
+                if key in integer_keys
+                else float(value)
+            )
+
+    read_map(section, direct_map)
+    read_map(section, direct_arc_compatibility)
+    read_map(arc_section, arc_map)
+    read_map(failure_section, failure_map)
+
+    return settings
 
 def _read_stage_k0(stage):
     """Read optional K0 initial-stress settings from one construction stage."""
