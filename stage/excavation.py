@@ -10,6 +10,7 @@ def build_excavation_release_path(
     active_element_ids,
     f_physical_target,
     free_dofs,
+    kinematics_cache=None,
 ):
     """
     Build the temporary holding-force state used to release excavation stress.
@@ -82,6 +83,7 @@ def build_excavation_release_path(
         mesh_elements=mesh_elements,
         gauss_states=state_manager.committed,
         active_element_ids=active_element_ids,
+        kinematics_cache=kinematics_cache,
     )
 
     holding_force = np.zeros_like(

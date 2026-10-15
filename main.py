@@ -754,6 +754,320 @@ else:
             ],
         )
 
+# =============================================================================
+# DETAILED SOLVER PERFORMANCE PROFILE
+# =============================================================================
+
+if stage_results:
+    profiled_stage_results = [
+        item
+        for item in stage_results
+        if item.get("performance_profile")
+    ]
+
+    if profiled_stage_results:
+        print()
+        print("=" * 118)
+        print("GEOPYFEM SOLVER PERFORMANCE PROFILE")
+        print("=" * 118)
+        print(
+            f"{'Stage':<32}"
+            f"{'Constitutive':>15}"
+            f"{'Fint':>12}"
+            f"{'Tangent':>12}"
+            f"{'Lin solve':>12}"
+            f"{'Other':>12}"
+            f"{'Total':>12}"
+        )
+        print("-" * 118)
+
+        aggregate_timings = {}
+        aggregate_counts = {}
+        aggregate_total = 0.0
+
+        for stage_result in profiled_stage_results:
+            profile = stage_result.get("performance_profile") or {}
+            timings = profile.get("timings") or {}
+            counts = profile.get("counts") or {}
+
+            stage_id = stage_result.get("stage_id")
+            stage_name = str(stage_result.get("stage_name") or "")
+            stage_label = f"{stage_id}  {stage_name}"
+            if len(stage_label) > 31:
+                stage_label = stage_label[:28] + "..."
+
+            constitutive_time = float(timings.get("constitutive_update", 0.0))
+            internal_time = float(timings.get("internal_force_assembly", 0.0))
+            tangent_time = float(timings.get("tangent_assembly", 0.0))
+            linear_time = float(timings.get("linear_solve", 0.0))
+            other_time = float(profile.get("other_time", 0.0))
+            total_time = float(
+                profile.get(
+                    "total_elapsed_time",
+                    stage_result.get("elapsed_time", 0.0),
+                )
+            )
+
+            print(
+                f"{stage_label:<32}"
+                f"{constitutive_time:>12.3f} s"
+                f"{internal_time:>9.3f} s"
+                f"{tangent_time:>9.3f} s"
+                f"{linear_time:>9.3f} s"
+                f"{other_time:>9.3f} s"
+                f"{total_time:>9.3f} s"
+            )
+
+            aggregate_total += total_time
+            for key, value in timings.items():
+                aggregate_timings[key] = (
+                    aggregate_timings.get(key, 0.0)
+                    + float(value)
+                )
+            for key, value in counts.items():
+                aggregate_counts[key] = (
+                    aggregate_counts.get(key, 0)
+                    + int(value)
+                )
+
+        print("-" * 118)
+
+        primary_keys = (
+            "constitutive_update",
+            "internal_force_assembly",
+            "tangent_assembly",
+            "linear_solve",
+            "k0_initialization",
+            "global_stiffness_assembly",
+            "linear_state_update",
+        )
+        primary_total = sum(
+            aggregate_timings.get(key, 0.0)
+            for key in primary_keys
+        )
+        aggregate_other = max(aggregate_total - primary_total, 0.0)
+
+        def _profile_pct(value):
+            if aggregate_total <= 0.0:
+                return 0.0
+            return 100.0 * float(value) / aggregate_total
+
+        print("Aggregate primary timing:")
+        aggregate_rows = [
+            ("Constitutive update", "constitutive_update"),
+            ("Internal-force assembly", "internal_force_assembly"),
+            ("Tangent assembly", "tangent_assembly"),
+            ("Linear solve", "linear_solve"),
+            ("K0 initialization", "k0_initialization"),
+            ("Other stage work", None),
+        ]
+        for label, key in aggregate_rows:
+            value = (
+                aggregate_other
+                if key is None
+                else aggregate_timings.get(key, 0.0)
+            )
+            if value <= 0.0 and key == "k0_initialization":
+                continue
+            print(
+                f"  {label:<27}: "
+                f"{value:>9.3f} s  "
+                f"({_profile_pct(value):5.1f} %)"
+            )
+
+        print("Nested/detail timing (already included above where applicable):")
+        detail_rows = [
+            ("material.integrate()", "constitutive_integration"),
+            ("tangent element integration", "tangent_element_integration"),
+            ("global matrix scatter", "matrix_scatter"),
+            ("global matrix finalize", "matrix_finalize"),
+            ("arc factor sensitivity", "arc_factor_sensitivity"),
+            ("arc augmented-system build", "arc_augmented_system_build"),
+        ]
+        detail_printed = False
+        for label, key in detail_rows:
+            value = aggregate_timings.get(key, 0.0)
+            if value > 0.0:
+                detail_printed = True
+                print(f"  {label:<27}: {value:>9.3f} s")
+        if not detail_printed:
+            print("  (no nested timing recorded)")
+
+        cache_time = solution.get("kinematics_cache_build_time")
+        if cache_time is not None:
+            print(
+                "One-time kinematics cache build :",
+                f"{float(cache_time):.3f} s",
+            )
+
+        pattern_time = solution.get("sparse_pattern_build_time")
+        pattern_nnz = solution.get("sparse_pattern_nnz")
+        pattern_count = int(solution.get("sparse_pattern_build_count", 0) or 0)
+        if pattern_time is not None and float(pattern_time) > 0.0:
+            message = f"{float(pattern_time):.3f} s"
+            details = []
+            if pattern_count:
+                details.append(f"patterns={pattern_count}")
+            if pattern_nnz is not None:
+                details.append(f"final nnz={int(pattern_nnz)}")
+            if details:
+                message += "  (" + ", ".join(details) + ")"
+            print("Sparse CSR pattern build total :", message)
+
+        print("Selected operation counts:")
+        count_rows = [
+            ("Constitutive integrations", "constitutive_calls"),
+            ("Internal-force assemblies", "internal_force_assemblies"),
+            ("Tangent assemblies", "tangent_assemblies"),
+            ("Linear solves", "linear_solve_calls"),
+            ("Matrix scatter calls", "matrix_scatter_calls"),
+            ("Fixed-CSR scatter calls", "fixed_csr_scatter_calls"),
+            ("Fixed-CSR finalizations", "fixed_csr_finalize_calls"),
+            ("Dynamic-COO finalizations", "dynamic_coo_finalize_calls"),
+            ("Arc sensitivity evaluations", "arc_factor_sensitivity_evaluations"),
+        ]
+        for label, key in count_rows:
+            value = aggregate_counts.get(key, 0)
+            if value:
+                print(f"  {label:<27}: {value}")
+
+        mc_total = aggregate_timings.get("mc_integrate_total", 0.0)
+        if mc_total > 0.0:
+            print()
+            print(
+                "Mohr-Coulomb fine-grained timing "
+                "(nested; percentages use MC integrate total):"
+            )
+            print(
+                "  note: fine-grained instrumentation adds runtime overhead; "
+                "use this run for breakdown, not wall-clock benchmarking."
+            )
+
+            def _mc_pct(value):
+                return 100.0 * float(value) / mc_total
+
+            mc_rows = [
+                ("MC integrate total", "mc_integrate_total"),
+                ("state integration", "mc_state_integration"),
+                ("  elastic predictor", "mc_elastic_predictor"),
+                ("  analytic principal values", "mc_analytic_principal_values"),
+                ("  fast elastic yield check", "mc_elastic_fast_yield_check"),
+                ("  full principal decomposition", "mc_principal_decomposition"),
+                ("  principal return", "mc_principal_return"),
+                ("    yield/setup", "mc_yield_setup"),
+                ("    face candidate", "mc_face_candidate"),
+                (
+                    "    compression-edge candidate",
+                    "mc_compression_edge_candidate",
+                ),
+                (
+                    "    extension-edge candidate",
+                    "mc_extension_edge_candidate",
+                ),
+                ("    apex return", "mc_apex_return"),
+                ("    active-set solves", "mc_active_set_linear_solve"),
+                ("  stress reconstruction", "mc_stress_reconstruction"),
+                ("  state copy/update", "mc_state_copy_update"),
+                ("  plastic-strain update", "mc_plastic_strain_update"),
+                ("  persistent state diagnostics", "mc_state_diagnostics"),
+                ("tangent selection/build", "mc_tangent_total"),
+                (
+                    "  analytic spectral tangent",
+                    "mc_analytic_spectral_tangent",
+                ),
+                ("  apex tangent", "mc_apex_tangent"),
+                (
+                    "  numerical tangent fallback",
+                    "mc_numerical_tangent_fallback",
+                ),
+                ("response construction", "mc_response_construction"),
+            ]
+            for label, key in mc_rows:
+                value = aggregate_timings.get(key, 0.0)
+                if value > 0.0:
+                    print(
+                        f"  {label:<34}: "
+                        f"{value:>9.3f} s  "
+                        f"({_mc_pct(value):5.1f} %)"
+                    )
+
+            print("Mohr-Coulomb branch counts (top-level constitutive calls):")
+            mc_count_rows = [
+                ("MC constitutive calls", "mc_constitutive_calls"),
+                ("MC local state integrations", "mc_state_integrations"),
+                ("elastic responses", "mc_region_elastic"),
+                ("elastic fast-path returns", "mc_elastic_fast_returns"),
+                ("analytic principal-value checks", "mc_analytic_principal_value_evaluations"),
+                ("fast-path plastic candidates", "mc_fast_path_plastic_candidates"),
+                ("yield-boundary fallbacks", "mc_fast_path_yield_boundary_fallbacks"),
+                ("non-plane-strain fallbacks", "mc_fast_path_non_plane_strain_fallbacks"),
+                ("face returns", "mc_region_face"),
+                ("compression-edge returns", "mc_region_compression_edge"),
+                ("extension-edge returns", "mc_region_extension_edge"),
+                ("Fortran apex returns", "mc_region_apex_fortran"),
+                ("legacy apex projections", "mc_region_apex_projection"),
+                ("numerical tangent fallbacks", "mc_numerical_tangent_fallbacks"),
+                ("principal decompositions", "mc_principal_decompositions"),
+                ("active-set linear solves", "mc_active_set_linear_solve_calls"),
+            ]
+            for label, key in mc_count_rows:
+                value = aggregate_counts.get(key, 0)
+                if value:
+                    print(f"  {label:<34}: {value}")
+
+            print("Mohr-Coulomb tangent-mode counts:")
+            tangent_count_rows = [
+                ("elastic", "mc_tangent_mode_elastic"),
+                ("analytic spectral", "mc_tangent_mode_analytic_spectral"),
+                (
+                    "numerical repeated-eigen fallback",
+                    "mc_tangent_mode_numerical_repeated_eigenvalue_fallback",
+                ),
+                (
+                    "Fortran modified apex",
+                    "mc_tangent_mode_fortran_modified_apex_single_singular",
+                ),
+                (
+                    "legacy zero apex",
+                    "mc_tangent_mode_apex_zero_legacy_projection",
+                ),
+            ]
+            for label, key in tangent_count_rows:
+                value = aggregate_counts.get(key, 0)
+                if value:
+                    print(f"  {label:<34}: {value}")
+
+else:
+    profile = solution.get("performance_profile") or {}
+    if profile:
+        timings = profile.get("timings") or {}
+        total_time = float(
+            profile.get("total_elapsed_time", analysis_elapsed_time)
+        )
+        primary_total = float(profile.get("primary_profiled_time", 0.0))
+        other_time = float(
+            profile.get("other_time", max(total_time - primary_total, 0.0))
+        )
+
+        print()
+        print("=" * 118)
+        print("GEOPYFEM SOLVER PERFORMANCE PROFILE")
+        print("=" * 118)
+        for label, key in (
+            ("Global stiffness assembly", "global_stiffness_assembly"),
+            ("Linear state update", "linear_state_update"),
+            ("Constitutive update", "constitutive_update"),
+            ("Internal-force assembly", "internal_force_assembly"),
+            ("Tangent assembly", "tangent_assembly"),
+            ("Linear solve", "linear_solve"),
+        ):
+            value = float(timings.get(key, 0.0))
+            if value > 0.0:
+                print(f"{label:<28}: {value:>9.3f} s")
+        print(f"{'Other solver work':<28}: {other_time:>9.3f} s")
+        print(f"{'Profiled solver total':<28}: {total_time:>9.3f} s")
+
+
 print()
 print(
     "Analysis started  :",

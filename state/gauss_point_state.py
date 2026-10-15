@@ -140,6 +140,10 @@ class GaussPointState:
     equivalent_plastic_strain: float = 0.0
     pore_pressure: float = 0.0
     yielded: bool = False
+    # Persistent constitutive/history/output variables only.  Temporary local
+    # integration work (eigenvectors, return-map Jacobians, trial principal
+    # arrays, etc.) must remain inside the constitutive call and must not be
+    # stored here, because this dictionary is copied during trial/commit/revert.
     internal_variables: dict = field(default_factory=dict)
 
     def copy(self):

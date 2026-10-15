@@ -1,7 +1,7 @@
 import numpy as np
 
 from elements.elemtype import get_element_type
-from elements.kinematics import build_B_matrix
+from elements.kinematics_cache import get_element_kinematics
 
 
 def _element_node_ids(
@@ -43,136 +43,41 @@ def _assemble_region_laplacian(
     nodes,
     mesh_elements,
     element_ids,
+    kinematics_cache=None,
 ):
-    """
-    Assemble a scalar FE Laplacian matrix over newly activated elements.
-
-    This is a purely kinematic auxiliary problem.  It is NOT a mechanical
-    stiffness matrix and does not use material E, nu, density, or stress.
-
-    The matrix is used to smoothly extend the already accumulated nodal
-    displacement from the old active interface into nodes that did not exist
-    mechanically before activation.
-    """
-    element_ids = {
-        int(element_id)
-        for element_id in element_ids
-    }
-
-    region_node_ids = sorted(
-        _element_node_ids(
-            mesh_elements=mesh_elements,
-            element_ids=element_ids,
-        )
-    )
-
+    """Assemble the scalar harmonic-extension operator for activated regions."""
+    element_ids = {int(element_id) for element_id in element_ids}
+    region_node_ids = sorted(_element_node_ids(mesh_elements, element_ids))
     if not region_node_ids:
         return [], np.zeros((0, 0), dtype=float)
 
-    local_index = {
-        node_id: local_id
-        for local_id, node_id in enumerate(region_node_ids)
-    }
-
-    K_extension = np.zeros(
-        (
-            len(region_node_ids),
-            len(region_node_ids),
-        ),
-        dtype=float,
-    )
-
+    local_index = {node_id: local_id for local_id, node_id in enumerate(region_node_ids)}
+    K_extension = np.zeros((len(region_node_ids), len(region_node_ids)), dtype=float)
     found_element_ids = set()
 
     for element in mesh_elements:
-        element_id = int(
-            element["id"]
-        )
-
+        element_id = int(element["id"])
         if element_id not in element_ids:
             continue
-
-        element_info = get_element_type(
-            element["type"]
-        )
-
-        if element_info["dimension"] != 2:
+        kin = get_element_kinematics(nodes, element, ndof_node=2, kinematics_cache=kinematics_cache)
+        if kin is None:
             continue
-
-        found_element_ids.add(
-            element_id
-        )
-
-        connectivity = [
-            int(node_id)
-            for node_id in element["connectivity"]
-        ]
-
-        coordinates = nodes[
-            connectivity,
-            :,
-        ]
-
-        gradshape = element_info[
-            "gradshape"
-        ]
-
-        gauss_points, weights = element_info[
-            "gauss"
-        ]()
-
-        Ke = np.zeros(
-            (
-                len(connectivity),
-                len(connectivity),
-            ),
-            dtype=float,
-        )
-
-        for q, weight in zip(
-            gauss_points,
-            weights,
-        ):
-            _, detJ, dN_global = build_B_matrix(
-                element_coordinates=coordinates,
-                gradshape=gradshape,
-                natural_coordinates=q,
-            )
-
-            # Scalar Laplacian / harmonic-extension operator:
-            #
-            #     Ke = integral(grad(N)^T grad(N) dOmega)
-            #
-            # It is used only to interpolate a smooth birth displacement.
-            Ke += (
-                dN_global.T
-                @ dN_global
-                * detJ
-                * weight
-            )
-
-        local_connectivity = [
-            local_index[node_id]
-            for node_id in connectivity
-        ]
-
+        found_element_ids.add(element_id)
+        Ke = np.zeros((kin.number_of_nodes, kin.number_of_nodes), dtype=float)
+        for gp in kin.gauss_points:
+            Ke += gp.dN_global.T @ gp.dN_global * gp.detJ * gp.weight
+        local_connectivity = [local_index[int(node_id)] for node_id in kin.connectivity]
         for a, A in enumerate(local_connectivity):
             for b, B in enumerate(local_connectivity):
                 K_extension[A, B] += Ke[a, b]
 
-    missing = (
-        element_ids
-        - found_element_ids
-    )
-
+    missing = element_ids - found_element_ids
     if missing:
         raise ValueError(
             "Could not assemble activation displacement extension for "
             f"element IDs {sorted(missing)}."
         )
-
     return region_node_ids, K_extension
-
 
 def extend_activation_birth_fields(
     nodes,
@@ -181,6 +86,7 @@ def extend_activation_birth_fields(
     previously_active_node_ids,
     displacement,
     displacement_reference=None,
+    kinematics_cache=None,
 ):
     """
     Give newly activated nodes a cumulative geometric birth displacement.
@@ -273,6 +179,7 @@ def extend_activation_birth_fields(
         nodes=nodes,
         mesh_elements=mesh_elements,
         element_ids=activated_element_ids,
+        kinematics_cache=kinematics_cache,
     )
 
     region_node_set = set(

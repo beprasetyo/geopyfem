@@ -1,3 +1,9 @@
+try:
+    from scipy.sparse import issparse
+except ImportError:  # Dense-only GeoPyFEM remains usable without SciPy.
+    def issparse(_):
+        return False
+
 def get_fixed_dofs(
     physical_groups,
     boundaries,
@@ -97,6 +103,38 @@ def get_fixed_dofs(
     return sorted(fixed_dofs)
 
 
+def apply_zero_displacement_constraints(
+    K,
+    f,
+    fixed_dofs,
+):
+    """Apply homogeneous Dirichlet constraints to a dense or sparse system.
+
+    The operation intentionally preserves GeoPyFEM's historical row-
+    replacement semantics.  Sparse matrices are converted temporarily to LIL
+    for efficient row editing and returned as CSR.
+    """
+    f = f.copy()
+
+    if issparse(K):
+        K_modified = K.tolil(copy=True)
+        for dof in fixed_dofs:
+            dof = int(dof)
+            K_modified.rows[dof] = [dof]
+            K_modified.data[dof] = [1.0]
+            f[dof] = 0.0
+        return K_modified.tocsr(), f
+
+    K_modified = K.copy()
+    for dof in fixed_dofs:
+        dof = int(dof)
+        K_modified[dof, :] = 0.0
+        K_modified[dof, dof] = 1.0
+        f[dof] = 0.0
+
+    return K_modified, f
+
+
 def apply_displacement_boundary_conditions(
     K,
     f,
@@ -160,9 +198,10 @@ def apply_displacement_boundary_conditions(
         verbose=verbose,
     )
 
-    for dof in fixed_dofs:
-        K[dof, :] = 0.0
-        K[dof, dof] = 1.0
-        f[dof] = 0.0
+    K, f = apply_zero_displacement_constraints(
+        K=K,
+        f=f,
+        fixed_dofs=fixed_dofs,
+    )
 
     return K, f, fixed_dofs

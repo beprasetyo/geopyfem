@@ -766,7 +766,30 @@ def _read_solver(root):
             )
             or "direct"
         ),
+        # Dense remains the backward-compatible default.  Sparse uses
+        # SciPy COO/CSR global assembly and sparse direct factorization.
+        "matrix_storage": (
+            _text(
+                section,
+                "MatrixStorage",
+            )
+            or "dense"
+        ),
     }
+
+    matrix_storage = str(
+        solver["matrix_storage"]
+    ).strip().lower()
+
+    if matrix_storage not in ("dense", "sparse"):
+        raise ValueError(
+            "<MatrixStorage> must be 'dense' or 'sparse'."
+        )
+
+    solver["matrix_storage"] = matrix_storage
+    solver["linear_solver"] = str(
+        solver["linear_solver"]
+    ).strip().lower()
 
     if nonlinear is not None:
         max_iterations = _convert_number(

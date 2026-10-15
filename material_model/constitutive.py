@@ -30,6 +30,15 @@ class MaterialContext:
     time: Optional[float] = None
     dt: Optional[float] = None
     coordinates: Optional[tuple] = None
+    performance_profiler: Optional[Any] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    # Optional instrumentation sink for fine-grained constitutive timing.
+    # Constitutive models may only record timing/counter diagnostics through
+    # this hook; they must not use it to inspect or alter global solver state.
 
 
 @dataclass
@@ -41,7 +50,7 @@ class ConstitutiveResponse:
 
         state.effective_stress  ~ STRESS   (GeoPyFEM uses effective stress)
         tangent                 ~ DDSDDE
-        state.internal_variables~ STATEV
+        state.internal_variables~ persistent STATEV/history/output data
 
     The global solver/assembly does not need to know which constitutive model
     produced the response.

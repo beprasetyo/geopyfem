@@ -1,7 +1,12 @@
+from time import perf_counter
+
 import numpy as np
 
-from elements.elemtype import get_element_type
-from elements.kinematics import build_B_matrix
+from elements.kinematics_cache import get_element_kinematics
+from assembly.matrix_builder import (
+    GlobalMatrixBuilder,
+    normalize_matrix_storage,
+)
 
 
 def assemble_global_stiffness(
@@ -10,163 +15,79 @@ def assemble_global_stiffness(
     material_models,
     active_element_ids=None,
     ndof_node=2,
+    matrix_storage="dense",
+    kinematics_cache=None,
+    profiler=None,
+    sparse_pattern=None,
 ):
+    """Assemble the linear global stiffness matrix.
+
+    ``kinematics_cache`` is optional for backward compatibility.  When a
+    shared cache is supplied, element DOF maps, B matrices, det(J), and Gauss
+    weights are reused rather than recomputed.
     """
-    Assemble the global stiffness matrix.
+    profile_start = perf_counter() if profiler is not None else None
+    if profiler is not None:
+        profiler.increment("global_stiffness_assemblies")
 
-    Parameters
-    ----------
-    nodes : ndarray, shape (nnode, 2)
-        Global nodal coordinates.
-    mesh_elements : list of dict
-        Domain elements returned by gmsh_parser.py.
-    material_models : dict
-        Constitutive model objects indexed by material region.
-        Each model must provide:
-
-            tangent_matrix(...)
-
-    ndof_node : int, optional
-        Number of global displacement DOFs per node.
-        Current 2-D continuum solver uses 2.
-
-    Returns
-    -------
-    K : ndarray
-        Global stiffness matrix.
-
-    Notes
-    -----
-    GeoPyFEM element formulation decides:
-        - number of nodes
-        - gradshape()
-        - Gauss integration rule
-
-    The material model decides:
-        - constitutive/tangent matrix C
-
-    This keeps global assembly independent of a specific element type and
-    independent of a specific constitutive model.
-
-    For future nonlinear/plastic analyses this function can be extended with
-    Gauss-point state variables and an iteration state. The current version
-    assembles a stiffness matrix from the tangent returned by each material
-    model without updating history variables.
-    """
+    matrix_storage = normalize_matrix_storage(matrix_storage)
     num_nodes = len(nodes)
+    ndof_total = ndof_node * num_nodes
 
-    K = np.zeros((
-        ndof_node * num_nodes,
-        ndof_node * num_nodes,
-    ))
+    builder = GlobalMatrixBuilder(
+        size=ndof_total,
+        matrix_storage=matrix_storage,
+        profiler=profiler,
+        sparse_pattern=sparse_pattern,
+    )
 
     active_element_ids = (
         None
         if active_element_ids is None
-        else {
-            int(element_id)
-            for element_id in active_element_ids
-        }
+        else {int(element_id) for element_id in active_element_ids}
     )
 
     for element in mesh_elements:
-        element_id = int(
-            element["id"]
-        )
-
-        if (
-            active_element_ids is not None
-            and element_id not in active_element_ids
-        ):
+        element_id = int(element["id"])
+        if active_element_ids is not None and element_id not in active_element_ids:
             continue
-        c = element["connectivity"]
 
-        # ---------------------------------------------------------------
-        # Element formulation
-        # ---------------------------------------------------------------
-        element_info = get_element_type(element["type"])
+        kinematics = get_element_kinematics(
+            nodes=nodes,
+            element=element,
+            ndof_node=ndof_node,
+            kinematics_cache=kinematics_cache,
+        )
+        if kinematics is None:
+            continue
 
-        nnode = element_info["nnode"]
-        element_ndof_node = element_info["ndof_node"]
-        gradshape = element_info["gradshape"]
-        gauss_rule = element_info["gauss"]
-
-        if element_ndof_node != ndof_node:
-            raise NotImplementedError(
-                f'Element "{element["type"]}" uses '
-                f"{element_ndof_node} DOFs/node, while global assembly "
-                f"is configured for {ndof_node} DOFs/node."
-            )
-
-        if len(c) != nnode:
-            raise ValueError(
-                f'Element {element["id"]} is {element["type"]} but its '
-                f'connectivity contains {len(c)} nodes instead of {nnode}.'
-            )
-
-        # ---------------------------------------------------------------
-        # Material model
-        # ---------------------------------------------------------------
         material_region = element["material"]
-
         if material_region not in material_models:
             raise ValueError(
-                f'Element {element["id"]} uses material region '
+                f'Element {element_id} uses material region '
                 f'"{material_region}", but no material model is assigned '
                 "to that region."
             )
 
         material_model = material_models[material_region]
+        C = np.asarray(material_model.tangent_matrix(), dtype=float).reshape(3, 3)
 
-        # For the current linear/static implementation C is constant for
-        # the element. A future nonlinear material can make this dependent
-        # on a Gauss-point state.
-        C = material_model.tangent_matrix()
+        Ke = np.zeros(
+            (kinematics.number_of_dofs, kinematics.number_of_dofs),
+            dtype=float,
+        )
 
-        # ---------------------------------------------------------------
-        # Element stiffness
-        # ---------------------------------------------------------------
-        gauss_points, gauss_weights = gauss_rule()
+        for gp in kinematics.gauss_points:
+            Ke += gp.B.T @ C @ gp.B * gp.detJ * gp.weight
 
-        xIe = nodes[c, :]
+        builder.add(kinematics.dofs, Ke, element_id=element_id)
 
-        ndof_element = ndof_node * nnode
+    matrix = builder.finalize()
 
-        Ke = np.zeros((
-            ndof_element,
-            ndof_element,
-        ))
+    if profiler is not None:
+        profiler.add_time(
+            "global_stiffness_assembly",
+            perf_counter() - profile_start,
+        )
 
-        for q, w in zip(gauss_points, gauss_weights):
-            # -----------------------------------------------------------
-            # Shared GeoPyFEM kinematics
-            #
-            # The same B-matrix routine is used by stiffness assembly
-            # and post-processing.
-            # -----------------------------------------------------------
-            B, detJ, _ = build_B_matrix(
-                element_coordinates=xIe,
-                gradshape=gradshape,
-                natural_coordinates=q,
-            )
-
-            Ke += (
-                np.dot(
-                    np.dot(B.T, C),
-                    B,
-                )
-                * detJ
-                * w
-            )
-
-        # ---------------------------------------------------------------
-        # Ke -> global K
-        # ---------------------------------------------------------------
-        for i, I in enumerate(c):
-            for j, Jnode in enumerate(c):
-                K[2*I, 2*Jnode] += Ke[2*i, 2*j]
-                K[2*I+1, 2*Jnode] += Ke[2*i+1, 2*j]
-                K[2*I+1, 2*Jnode+1] += Ke[2*i+1, 2*j+1]
-                K[2*I, 2*Jnode+1] += Ke[2*i, 2*j+1]
-
-    return K
+    return matrix

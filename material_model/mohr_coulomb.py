@@ -1,3 +1,7 @@
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Optional
+
 import numpy as np
 
 from material_model.constitutive import (
@@ -5,6 +9,48 @@ from material_model.constitutive import (
     ConstitutiveResponse,
 )
 from state.gauss_point_state import plane_strain_2d_to_voigt6
+
+
+
+@dataclass(slots=True)
+class _MohrCoulombLocalResult:
+    """One local MC update with transient spectral data kept off the state.
+
+    ``state`` contains only history/output variables that must survive a
+    committed increment.  Principal stresses/directions/Jacobians are local
+    work data required only while constructing the algorithmic tangent.
+    Keeping them here avoids copying several small NumPy arrays through every
+    trial/commit/revert operation.
+    """
+
+    state: object
+    region: str
+    yield_function_trial: float
+    yield_function: float
+    plastic_multiplier: float
+    q: float
+    p_compression_positive: float
+    principal_trial_compression_positive: np.ndarray
+    principal_new_compression_positive: np.ndarray
+    principal_directions: Optional[np.ndarray]
+    principal_jacobian: Optional[np.ndarray]
+
+
+def _mc_profile_start(profiler):
+    return perf_counter() if profiler is not None else None
+
+
+def _mc_profile_add(profiler, name, start, count_name=None, count=1):
+    if profiler is None or start is None:
+        return
+    profiler.add_time(name, perf_counter() - start)
+    if count_name is not None:
+        profiler.increment(count_name, count)
+
+
+def _mc_profile_increment(profiler, name, count=1):
+    if profiler is not None:
+        profiler.increment(name, count)
 
 
 class MohrCoulomb(ConstitutiveModel):
@@ -42,6 +88,13 @@ class MohrCoulomb(ConstitutiveModel):
     - apex_fortran: direct apex projection with the modified single-singular
       apex tangent used by the reference Fortran implementation
     - apex_projection: retained as a legacy zero-tangent diagnostic mode
+
+    Elastic fast path
+    -----------------
+    - plane-strain trial principal VALUES are evaluated analytically;
+    - clearly elastic trials return without ``np.linalg.eigh``;
+    - full principal directions are computed only for plastic/near-yield
+      states, so the verified plastic face/edge/apex return remains unchanged.
 
     Tangent
     -------
@@ -362,11 +415,145 @@ class MohrCoulomb(ConstitutiveModel):
         )
 
     @staticmethod
-    def _principal_decomposition_compression_positive(stress_cp):
+    def _principal_decomposition_compression_positive(
+        stress_cp,
+        profiler=None,
+    ):
+        profile_start = _mc_profile_start(profiler)
         tensor = MohrCoulomb._stress_voigt6_to_tensor(stress_cp)
         values, vectors = np.linalg.eigh(tensor)
         order = np.argsort(values)[::-1]
-        return values[order], vectors[:, order]
+        result = values[order], vectors[:, order]
+        _mc_profile_add(
+            profiler,
+            "mc_principal_decomposition",
+            profile_start,
+            count_name="mc_principal_decompositions",
+        )
+        return result
+
+    @staticmethod
+    def _plane_strain_principal_values_compression_positive(
+        stress_cp,
+        profiler=None,
+    ):
+        """Return ordered principal values without computing eigenvectors.
+
+        For the current plane-strain constitutive state the stress tensor has
+        the block form
+
+            [ sxx  txy   0 ]
+            [ txy  syy   0 ]
+            [  0    0   szz]
+
+        so the two in-plane eigenvalues are available analytically and the
+        third principal value is simply ``szz``.  This is the hot-path
+        operation used for the elastic Mohr-Coulomb yield check.
+        """
+        profile_start = _mc_profile_start(profiler)
+        try:
+            sxx, syy, szz, txy, tyz, txz = np.asarray(
+                stress_cp, dtype=float
+            ).reshape(6)
+
+            # Plane strain should not generate yz/xz shear.  If a future
+            # extension supplies such components, preserve correctness by
+            # declining the fast path and letting the caller use full eigh.
+            shear_scale = max(
+                1.0,
+                abs(sxx),
+                abs(syy),
+                abs(szz),
+                abs(txy),
+            )
+            shear_tol = 64.0 * np.finfo(float).eps * shear_scale
+            if abs(tyz) > shear_tol or abs(txz) > shear_tol:
+                return None
+
+            mean_xy = 0.5 * (sxx + syy)
+            radius_xy = float(
+                np.hypot(0.5 * (sxx - syy), txy)
+            )
+            sa = mean_xy + radius_xy
+            sb = mean_xy - radius_xy
+            sc = szz
+
+            # Manual ordering avoids a general eigensolver and keeps the
+            # internal compression-positive convention sigma1 >= sigma2 >=
+            # sigma3.
+            s1 = max(sa, sb, sc)
+            s3 = min(sa, sb, sc)
+            s2 = sa + sb + sc - s1 - s3
+
+            return np.array([s1, s2, s3], dtype=float)
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_analytic_principal_values",
+                profile_start,
+                count_name="mc_analytic_principal_value_evaluations",
+            )
+
+    def _elastic_fast_trial_check(self, stress_trial_cp, profiler=None):
+        """Check the MC trial yield condition without full eigenvectors.
+
+        Returns ``(principal_values, f_trial, definitely_elastic)``.  A tiny
+        floating-point guard around the yield tolerance deliberately falls
+        back to the original full spectral path so near-yield decisions retain
+        the previously validated behaviour.
+        """
+        profile_start = _mc_profile_start(profiler)
+        try:
+            principal = self._plane_strain_principal_values_compression_positive(
+                stress_trial_cp,
+                profiler=profiler,
+            )
+            if principal is None:
+                _mc_profile_increment(
+                    profiler,
+                    "mc_fast_path_non_plane_strain_fallbacks",
+                )
+                return None, None, False
+
+            phi = np.radians(self.friction_angle)
+            sin_phi = np.sin(phi)
+            A = 1.0 - sin_phi
+            B = 1.0 + sin_phi
+            C = 2.0 * self.cohesion * np.cos(phi)
+
+            f_trial = float(A * principal[0] - B * principal[2] - C)
+            tol = self._yield_tolerance()
+
+            scale = max(
+                1.0,
+                abs(A * principal[0]),
+                abs(B * principal[2]),
+                abs(C),
+            )
+            roundoff_guard = 64.0 * np.finfo(float).eps * scale
+            definitely_elastic = f_trial <= (tol - roundoff_guard)
+
+            if definitely_elastic:
+                _mc_profile_increment(profiler, "mc_elastic_fast_returns")
+            elif f_trial <= tol + roundoff_guard:
+                _mc_profile_increment(
+                    profiler,
+                    "mc_fast_path_yield_boundary_fallbacks",
+                )
+            else:
+                _mc_profile_increment(
+                    profiler,
+                    "mc_fast_path_plastic_candidates",
+                )
+
+            return principal, f_trial, definitely_elastic
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_elastic_fast_yield_check",
+                profile_start,
+                count_name="mc_elastic_fast_yield_checks",
+            )
 
     @staticmethod
     def _principal_to_cartesian(principal_stress, directions):
@@ -449,17 +636,33 @@ class MohrCoulomb(ConstitutiveModel):
             and np.all(dlambda >= -tol)
         )
 
-    def _active_set_return(self, stress_trial, A, B, cohesion_term):
+    def _active_set_return(
+        self,
+        stress_trial,
+        A,
+        B,
+        cohesion_term,
+        profiler=None,
+    ):
         n_active = A.shape[1]
         f_trial = A.T @ stress_trial - cohesion_term * np.ones(n_active)
 
         M = A.T @ self._Cp @ B
+        solve_start = _mc_profile_start(profiler)
         dlambda = np.linalg.solve(M, f_trial)
+        Y = np.linalg.solve(M, A.T)
+        _mc_profile_add(
+            profiler,
+            "mc_active_set_linear_solve",
+            solve_start,
+            count_name="mc_active_set_linear_solve_calls",
+            count=2,
+        )
+
         dstrain_p = B @ dlambda
         stress_new = stress_trial - self._Cp @ dstrain_p
 
         # H = d sigma_new_principal / d sigma_trial_principal
-        Y = np.linalg.solve(M, A.T)
         H = np.eye(3) - self._Cp @ B @ Y
         Dalg_principal = H @ self._Cp
 
@@ -562,134 +765,213 @@ class MohrCoulomb(ConstitutiveModel):
             "apex_koiter_direction_principal": koiter_direction,
         }
 
-    def _principal_return(self, stress_trial):
-        (
-            a13,
-            a12,
-            a23,
-            b13,
-            b12,
-            b23,
-        ) = self._mc_plane_vectors()
+    def _principal_return(self, stress_trial, profiler=None):
+        profile_start = _mc_profile_start(profiler)
+        try:
+            setup_start = _mc_profile_start(profiler)
+            (
+                a13,
+                a12,
+                a23,
+                b13,
+                b12,
+                b23,
+            ) = self._mc_plane_vectors()
 
-        C = self._cohesion_term()
-        tol = self._yield_tolerance()
-
-        f13_trial = self._yield_value(stress_trial, a13, C)
-
-        if f13_trial <= tol:
-            return {
-                "stress": stress_trial.copy(),
-                "region": "elastic",
-                "yielded": False,
-                "plastic_strain_increment_principal": np.zeros(3),
-                "dlambda": np.zeros(0, dtype=float),
-                "tangent_principal": self._Cp.copy(),
-                "principal_jacobian": np.eye(3),
-                "yield_function_trial": float(f13_trial),
-            }
-
-        A_face = a13.reshape(3, 1)
-        B_face = b13.reshape(3, 1)
-        (
-            stress_face,
-            deps_face,
-            dlambda_face,
-            Dalg_face,
-            H_face,
-        ) = self._active_set_return(stress_trial, A_face, B_face, C)
-
-        if self._is_ordered(stress_face, tol) and np.all(dlambda_face >= -tol):
-            return {
-                "stress": stress_face,
-                "region": "face",
-                "yielded": True,
-                "plastic_strain_increment_principal": deps_face,
-                "dlambda": dlambda_face,
-                "tangent_principal": Dalg_face,
-                "principal_jacobian": H_face,
-                "yield_function_trial": float(f13_trial),
-            }
-
-        A_ce = np.column_stack([a13, a12])
-        B_ce = np.column_stack([b13, b12])
-        (
-            stress_ce,
-            deps_ce,
-            dlambda_ce,
-            Dalg_ce,
-            H_ce,
-        ) = self._active_set_return(stress_trial, A_ce, B_ce, C)
-
-        if self._valid_compression_edge(stress_ce, dlambda_ce, tol):
-            return {
-                "stress": stress_ce,
-                "region": "compression_edge",
-                "yielded": True,
-                "plastic_strain_increment_principal": deps_ce,
-                "dlambda": dlambda_ce,
-                "tangent_principal": Dalg_ce,
-                "principal_jacobian": H_ce,
-                "yield_function_trial": float(f13_trial),
-            }
-
-        A_ee = np.column_stack([a13, a23])
-        B_ee = np.column_stack([b13, b23])
-        (
-            stress_ee,
-            deps_ee,
-            dlambda_ee,
-            Dalg_ee,
-            H_ee,
-        ) = self._active_set_return(stress_trial, A_ee, B_ee, C)
-
-        if self._valid_extension_edge(stress_ee, dlambda_ee, tol):
-            return {
-                "stress": stress_ee,
-                "region": "extension_edge",
-                "yielded": True,
-                "plastic_strain_increment_principal": deps_ee,
-                "dlambda": dlambda_ee,
-                "tangent_principal": Dalg_ee,
-                "principal_jacobian": H_ee,
-                "yield_function_trial": float(f13_trial),
-            }
-
-        # Apex return.  The stress projection is the same closed-form apex
-        # projection used by the reference Fortran implementation.
-        if self.friction_angle <= 0.0:
-            raise NotImplementedError(
-                "MohrCoulomb reached the apex branch with phi=0. "
-                "No finite cohesive MC apex exists for phi=0."
+            C = self._cohesion_term()
+            tol = self._yield_tolerance()
+            f13_trial = self._yield_value(stress_trial, a13, C)
+            _mc_profile_add(
+                profiler,
+                "mc_yield_setup",
+                setup_start,
+                count_name="mc_yield_checks",
             )
 
-        phi = np.radians(self.friction_angle)
-        p_apex = -self.cohesion / np.tan(phi)
+            if f13_trial <= tol:
+                return {
+                    "stress": stress_trial.copy(),
+                    "region": "elastic",
+                    "yielded": False,
+                    "plastic_strain_increment_principal": np.zeros(3),
+                    "dlambda": np.zeros(0, dtype=float),
+                    "tangent_principal": self._Cp.copy(),
+                    "principal_jacobian": np.eye(3),
+                    "yield_function_trial": float(f13_trial),
+                }
 
-        if self.apex_mode == "error":
-            raise NotImplementedError(
-                "MohrCoulomb entered the apex region while apex_mode='error'."
+            face_start = _mc_profile_start(profiler)
+            A_face = a13.reshape(3, 1)
+            B_face = b13.reshape(3, 1)
+            (
+                stress_face,
+                deps_face,
+                dlambda_face,
+                Dalg_face,
+                H_face,
+            ) = self._active_set_return(
+                stress_trial,
+                A_face,
+                B_face,
+                C,
+                profiler=profiler,
+            )
+            face_valid = (
+                self._is_ordered(stress_face, tol)
+                and np.all(dlambda_face >= -tol)
+            )
+            _mc_profile_add(
+                profiler,
+                "mc_face_candidate",
+                face_start,
+                count_name="mc_face_candidate_evaluations",
             )
 
-        if self.apex_mode == "projection":
-            # Legacy diagnostic mode: geometric projection with zero tangent
-            # and no plastic-strain increment.
-            return {
-                "stress": np.array([p_apex, p_apex, p_apex], dtype=float),
-                "region": "apex_projection",
-                "yielded": True,
-                "plastic_strain_increment_principal": None,
-                "dlambda": np.zeros(0, dtype=float),
-                "tangent_principal": np.zeros((3, 3), dtype=float),
-                "principal_jacobian": np.zeros((3, 3), dtype=float),
-                "yield_function_trial": float(f13_trial),
-            }
+            if face_valid:
+                return {
+                    "stress": stress_face,
+                    "region": "face",
+                    "yielded": True,
+                    "plastic_strain_increment_principal": deps_face,
+                    "dlambda": dlambda_face,
+                    "tangent_principal": Dalg_face,
+                    "principal_jacobian": H_face,
+                    "yield_function_trial": float(f13_trial),
+                }
 
-        return self._fortran_apex_return(
-            stress_trial=stress_trial,
-            p_apex=p_apex,
-            f13_trial=f13_trial,
-        )
+            compression_edge_start = _mc_profile_start(profiler)
+            A_ce = np.column_stack([a13, a12])
+            B_ce = np.column_stack([b13, b12])
+            (
+                stress_ce,
+                deps_ce,
+                dlambda_ce,
+                Dalg_ce,
+                H_ce,
+            ) = self._active_set_return(
+                stress_trial,
+                A_ce,
+                B_ce,
+                C,
+                profiler=profiler,
+            )
+            compression_edge_valid = self._valid_compression_edge(
+                stress_ce,
+                dlambda_ce,
+                tol,
+            )
+            _mc_profile_add(
+                profiler,
+                "mc_compression_edge_candidate",
+                compression_edge_start,
+                count_name="mc_compression_edge_candidate_evaluations",
+            )
+
+            if compression_edge_valid:
+                return {
+                    "stress": stress_ce,
+                    "region": "compression_edge",
+                    "yielded": True,
+                    "plastic_strain_increment_principal": deps_ce,
+                    "dlambda": dlambda_ce,
+                    "tangent_principal": Dalg_ce,
+                    "principal_jacobian": H_ce,
+                    "yield_function_trial": float(f13_trial),
+                }
+
+            extension_edge_start = _mc_profile_start(profiler)
+            A_ee = np.column_stack([a13, a23])
+            B_ee = np.column_stack([b13, b23])
+            (
+                stress_ee,
+                deps_ee,
+                dlambda_ee,
+                Dalg_ee,
+                H_ee,
+            ) = self._active_set_return(
+                stress_trial,
+                A_ee,
+                B_ee,
+                C,
+                profiler=profiler,
+            )
+            extension_edge_valid = self._valid_extension_edge(
+                stress_ee,
+                dlambda_ee,
+                tol,
+            )
+            _mc_profile_add(
+                profiler,
+                "mc_extension_edge_candidate",
+                extension_edge_start,
+                count_name="mc_extension_edge_candidate_evaluations",
+            )
+
+            if extension_edge_valid:
+                return {
+                    "stress": stress_ee,
+                    "region": "extension_edge",
+                    "yielded": True,
+                    "plastic_strain_increment_principal": deps_ee,
+                    "dlambda": dlambda_ee,
+                    "tangent_principal": Dalg_ee,
+                    "principal_jacobian": H_ee,
+                    "yield_function_trial": float(f13_trial),
+                }
+
+            apex_start = _mc_profile_start(profiler)
+            try:
+                # Apex return.  The stress projection is the same closed-form
+                # apex projection used by the reference Fortran implementation.
+                if self.friction_angle <= 0.0:
+                    raise NotImplementedError(
+                        "MohrCoulomb reached the apex branch with phi=0. "
+                        "No finite cohesive MC apex exists for phi=0."
+                    )
+
+                phi = np.radians(self.friction_angle)
+                p_apex = -self.cohesion / np.tan(phi)
+
+                if self.apex_mode == "error":
+                    raise NotImplementedError(
+                        "MohrCoulomb entered the apex region while "
+                        "apex_mode='error'."
+                    )
+
+                if self.apex_mode == "projection":
+                    return {
+                        "stress": np.array(
+                            [p_apex, p_apex, p_apex],
+                            dtype=float,
+                        ),
+                        "region": "apex_projection",
+                        "yielded": True,
+                        "plastic_strain_increment_principal": None,
+                        "dlambda": np.zeros(0, dtype=float),
+                        "tangent_principal": np.zeros((3, 3), dtype=float),
+                        "principal_jacobian": np.zeros((3, 3), dtype=float),
+                        "yield_function_trial": float(f13_trial),
+                    }
+
+                return self._fortran_apex_return(
+                    stress_trial=stress_trial,
+                    p_apex=p_apex,
+                    f13_trial=f13_trial,
+                )
+            finally:
+                _mc_profile_add(
+                    profiler,
+                    "mc_apex_return",
+                    apex_start,
+                    count_name="mc_apex_return_evaluations",
+                )
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_principal_return",
+                profile_start,
+                count_name="mc_principal_return_calls",
+            )
 
     # =========================================================================
     # SPECTRAL TANGENT
@@ -713,6 +995,7 @@ class MohrCoulomb(ConstitutiveModel):
         principal_new,
         directions,
         H,
+        profiler=None,
     ):
         """
         Full 6x6 tangent in the same numerical convention as GeoPyFEM.
@@ -721,54 +1004,67 @@ class MohrCoulomb(ConstitutiveModel):
         and strain signs, so d(sigma_tension)/d(epsilon_tension) has the same
         numerical tangent as the compression-positive derivative.
         """
-        Dcart = np.zeros((6, 6), dtype=float)
+        profile_start = _mc_profile_start(profiler)
+        try:
+            Dcart = np.zeros((6, 6), dtype=float)
 
-        for j in range(6):
-            deps = np.zeros(6, dtype=float)
-            deps[j] = 1.0
+            for j in range(6):
+                deps = np.zeros(6, dtype=float)
+                deps[j] = 1.0
 
-            dstress_trial_vec = self._C6 @ deps
-            dstress_trial_tensor = self._stress_voigt6_to_tensor(
-                dstress_trial_vec
-            )
+                dstress_trial_vec = self._C6 @ deps
+                dstress_trial_tensor = self._stress_voigt6_to_tensor(
+                    dstress_trial_vec
+                )
 
-            dtrial_p = directions.T @ dstress_trial_tensor @ directions
-            dnew_p = np.zeros((3, 3), dtype=float)
+                dtrial_p = directions.T @ dstress_trial_tensor @ directions
+                dnew_p = np.zeros((3, 3), dtype=float)
 
-            dnew_diag = H @ np.diag(dtrial_p)
-            for i in range(3):
-                dnew_p[i, i] = dnew_diag[i]
+                dnew_diag = H @ np.diag(dtrial_p)
+                for i in range(3):
+                    dnew_p[i, i] = dnew_diag[i]
 
-            for i in range(3):
-                for k in range(i + 1, 3):
-                    denominator = principal_trial[i] - principal_trial[k]
-                    scale = max(
-                        1.0,
-                        abs(principal_trial[i]),
-                        abs(principal_trial[k]),
-                    )
-                    if abs(denominator) < self.repeated_eigenvalue_tolerance * scale:
-                        raise ValueError(
-                            "Repeated trial principal stresses encountered "
-                            "inside analytic spectral tangent."
+                for i in range(3):
+                    for k in range(i + 1, 3):
+                        denominator = principal_trial[i] - principal_trial[k]
+                        scale = max(
+                            1.0,
+                            abs(principal_trial[i]),
+                            abs(principal_trial[k]),
                         )
+                        if (
+                            abs(denominator)
+                            < self.repeated_eigenvalue_tolerance * scale
+                        ):
+                            raise ValueError(
+                                "Repeated trial principal stresses encountered "
+                                "inside analytic spectral tangent."
+                            )
 
-                    beta = (
-                        principal_new[i] - principal_new[k]
-                    ) / denominator
-                    value = beta * dtrial_p[i, k]
-                    dnew_p[i, k] = value
-                    dnew_p[k, i] = value
+                        beta = (
+                            principal_new[i] - principal_new[k]
+                        ) / denominator
+                        value = beta * dtrial_p[i, k]
+                        dnew_p[i, k] = value
+                        dnew_p[k, i] = value
 
-            dnew_cart = directions @ dnew_p @ directions.T
-            Dcart[:, j] = self._stress_tensor_to_voigt6(dnew_cart)
+                dnew_cart = directions @ dnew_p @ directions.T
+                Dcart[:, j] = self._stress_tensor_to_voigt6(dnew_cart)
 
-        return Dcart
+            return Dcart
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_analytic_spectral_tangent",
+                profile_start,
+                count_name="mc_analytic_spectral_tangent_calls",
+            )
 
     def _apex_cartesian_tangent_6d(
         self,
         directions,
         H,
+        profiler=None,
     ):
         """Rotate the modified Fortran-style apex tangent to Cartesian form.
 
@@ -778,149 +1074,264 @@ class MohrCoulomb(ConstitutiveModel):
         only the modified principal normal tangent and sets those spectral
         shear terms to zero, avoiding divisions by repeated principal stresses.
         """
-        directions = np.asarray(directions, dtype=float).reshape(3, 3)
-        H = np.asarray(H, dtype=float).reshape(3, 3)
-        Dcart = np.zeros((6, 6), dtype=float)
+        profile_start = _mc_profile_start(profiler)
+        try:
+            directions = np.asarray(directions, dtype=float).reshape(3, 3)
+            H = np.asarray(H, dtype=float).reshape(3, 3)
+            Dcart = np.zeros((6, 6), dtype=float)
 
-        for j in range(6):
-            deps = np.zeros(6, dtype=float)
-            deps[j] = 1.0
+            for j in range(6):
+                deps = np.zeros(6, dtype=float)
+                deps[j] = 1.0
 
-            dstress_trial_vec = self._C6 @ deps
-            dstress_trial_tensor = self._stress_voigt6_to_tensor(
-                dstress_trial_vec
+                dstress_trial_vec = self._C6 @ deps
+                dstress_trial_tensor = self._stress_voigt6_to_tensor(
+                    dstress_trial_vec
+                )
+                dtrial_tensor_p = (
+                    directions.T @ dstress_trial_tensor @ directions
+                )
+
+                dnew_diag = H @ np.diag(dtrial_tensor_p)
+                dnew_tensor_p = np.diag(dnew_diag)
+
+                dnew_cart = directions @ dnew_tensor_p @ directions.T
+                Dcart[:, j] = self._stress_tensor_to_voigt6(dnew_cart)
+
+            return Dcart
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_apex_tangent",
+                profile_start,
+                count_name="mc_apex_tangent_calls",
             )
-            dtrial_tensor_p = (
-                directions.T @ dstress_trial_tensor @ directions
-            )
-
-            dnew_diag = H @ np.diag(dtrial_tensor_p)
-            dnew_tensor_p = np.diag(dnew_diag)
-
-            dnew_cart = directions @ dnew_tensor_p @ directions.T
-            Dcart[:, j] = self._stress_tensor_to_voigt6(dnew_cart)
-
-        return Dcart
 
     # =========================================================================
     # LOCAL STRESS INTEGRATION
     # =========================================================================
+
+    def _integrate_local_result(
+        self,
+        total_strain_2d,
+        strain_increment_2d,
+        committed_state,
+        profiler=None,
+    ):
+        """Perform one local stress update without building the 2-D tangent.
+
+        The dominant elastic path first evaluates only the three principal
+        *values* analytically.  Full ``np.linalg.eigh`` (and therefore
+        principal directions) is deferred until the trial state is plastic or
+        lies inside a tiny roundoff guard around the yield tolerance.
+
+        Persistent constitutive/output data are written to ``state``.
+        Spectral quantities needed only by a plastic tangent remain transient
+        in the returned local-result object.
+        """
+        profile_start = _mc_profile_start(profiler)
+        _mc_profile_increment(profiler, "mc_state_integrations")
+        try:
+            predictor_start = _mc_profile_start(profiler)
+            total_strain_2d = np.asarray(
+                total_strain_2d,
+                dtype=float,
+            ).reshape(3)
+            strain_increment_2d = np.asarray(
+                strain_increment_2d,
+                dtype=float,
+            ).reshape(3)
+
+            total_strain_6 = plane_strain_2d_to_voigt6(total_strain_2d)
+            dstrain_6 = plane_strain_2d_to_voigt6(strain_increment_2d)
+
+            stress_old_tp = self._effective_stress_from_state(committed_state)
+            stress_trial_tp = stress_old_tp + self._C6 @ dstrain_6
+
+            # GeoPyFEM is tension-positive.  The verified MC return is
+            # internally compression-positive; convert only inside the local
+            # integration.
+            stress_trial_cp = -stress_trial_tp
+            _mc_profile_add(
+                profiler,
+                "mc_elastic_predictor",
+                predictor_start,
+            )
+
+            # -------------------------------------------------------------
+            # Elastic fast path: principal values only, no eigenvectors.
+            # -------------------------------------------------------------
+            (
+                principal_fast_cp,
+                f_trial_fast,
+                definitely_elastic,
+            ) = self._elastic_fast_trial_check(
+                stress_trial_cp,
+                profiler=profiler,
+            )
+
+            directions = None
+            if definitely_elastic:
+                principal_trial_cp = principal_fast_cp
+                principal_new_cp = principal_fast_cp
+                stress_new_tp = stress_trial_tp
+                result = {
+                    "stress": principal_new_cp,
+                    "region": "elastic",
+                    "yielded": False,
+                    "plastic_strain_increment_principal": None,
+                    "dlambda": np.zeros(0, dtype=float),
+                    "principal_jacobian": None,
+                    "yield_function_trial": float(f_trial_fast),
+                }
+            else:
+                # Plastic (or near-yield) states retain the previously
+                # validated full spectral return mapping unchanged.
+                principal_trial_cp, directions = (
+                    self._principal_decomposition_compression_positive(
+                        stress_trial_cp,
+                        profiler=profiler,
+                    )
+                )
+                result = self._principal_return(
+                    principal_trial_cp,
+                    profiler=profiler,
+                )
+                principal_new_cp = result["stress"]
+
+                if result["yielded"]:
+                    reconstruction_start = _mc_profile_start(profiler)
+                    stress_new_cp = self._principal_to_cartesian(
+                        principal_new_cp,
+                        directions,
+                    )
+                    stress_new_tp = -stress_new_cp
+                    _mc_profile_add(
+                        profiler,
+                        "mc_stress_reconstruction",
+                        reconstruction_start,
+                    )
+                else:
+                    # Near-yield fallback classified elastic by the original
+                    # full spectral path.  The Cartesian trial stress is exact
+                    # and needs no reconstruction.
+                    stress_new_tp = stress_trial_tp
+                    directions = None
+
+            state_update_start = _mc_profile_start(profiler)
+            trial_state = committed_state.copy()
+            trial_state.strain[:] = total_strain_6
+            self._set_effective_stress(trial_state, stress_new_tp)
+            trial_state.yielded = bool(result["yielded"])
+            _mc_profile_add(
+                profiler,
+                "mc_state_copy_update",
+                state_update_start,
+            )
+
+            # Accumulate plastic strain only for yielded branches.
+            plastic_start = _mc_profile_start(profiler)
+            deps_p_principal_cp = result[
+                "plastic_strain_increment_principal"
+            ]
+            if result["yielded"] and deps_p_principal_cp is not None:
+                deps_p_tensor_cp = (
+                    directions
+                    @ np.diag(deps_p_principal_cp)
+                    @ directions.T
+                )
+                deps_p_tensor_tp = -deps_p_tensor_cp
+                deps_p_voigt_tp = self._strain_tensor_to_voigt6(
+                    deps_p_tensor_tp
+                )
+                trial_state.plastic_strain[:] = (
+                    np.asarray(
+                        committed_state.plastic_strain,
+                        dtype=float,
+                    )
+                    + deps_p_voigt_tp
+                )
+            _mc_profile_add(
+                profiler,
+                "mc_plastic_strain_update",
+                plastic_start,
+            )
+
+            diagnostics_start = _mc_profile_start(profiler)
+            if result["yielded"]:
+                a13, _, _, _, _, _ = self._mc_plane_vectors()
+                C = self._cohesion_term()
+                yield_function_new = self._yield_value(
+                    principal_new_cp,
+                    a13,
+                    C,
+                )
+            else:
+                # For an elastic return the updated state is the trial state,
+                # so no second MC geometry evaluation is required.
+                yield_function_new = float(result["yield_function_trial"])
+
+            q_new = self._q_from_principal(principal_new_cp)
+            p_new_cp = float(np.mean(principal_new_cp))
+            dlambda = np.asarray(result["dlambda"], dtype=float).reshape(-1)
+            plastic_multiplier = float(
+                np.sum(dlambda) if dlambda.size else 0.0
+            )
+
+            trial_state.internal_variables["mc_region"] = result["region"]
+            trial_state.internal_variables["yield_function_trial"] = float(
+                result["yield_function_trial"]
+            )
+            trial_state.internal_variables["yield_function"] = float(
+                yield_function_new
+            )
+            trial_state.internal_variables["plastic_multiplier"] = (
+                plastic_multiplier
+            )
+            trial_state.internal_variables["q"] = float(q_new)
+            trial_state.internal_variables["p_compression_positive"] = (
+                p_new_cp
+            )
+            _mc_profile_add(
+                profiler,
+                "mc_state_diagnostics",
+                diagnostics_start,
+            )
+
+            return _MohrCoulombLocalResult(
+                state=trial_state,
+                region=str(result["region"]),
+                yield_function_trial=float(result["yield_function_trial"]),
+                yield_function=float(yield_function_new),
+                plastic_multiplier=plastic_multiplier,
+                q=float(q_new),
+                p_compression_positive=p_new_cp,
+                principal_trial_compression_positive=principal_trial_cp,
+                principal_new_compression_positive=principal_new_cp,
+                principal_directions=directions,
+                principal_jacobian=result["principal_jacobian"],
+            )
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_state_integration",
+                profile_start,
+            )
 
     def _integrate_state(
         self,
         total_strain_2d,
         strain_increment_2d,
         committed_state,
+        profiler=None,
     ):
-        """Perform one local stress update without computing the 2-D tangent."""
-        total_strain_2d = np.asarray(total_strain_2d, dtype=float).reshape(3)
-        strain_increment_2d = np.asarray(
-            strain_increment_2d, dtype=float
-        ).reshape(3)
-
-        total_strain_6 = plane_strain_2d_to_voigt6(total_strain_2d)
-        dstrain_6 = plane_strain_2d_to_voigt6(strain_increment_2d)
-
-        stress_old_tp = self._effective_stress_from_state(committed_state)
-        stress_trial_tp = stress_old_tp + self._C6 @ dstrain_6
-
-        # GeoPyFEM is tension-positive.  The verified MC return is internally
-        # compression-positive; convert only inside the local integration.
-        stress_trial_cp = -stress_trial_tp
-
-        principal_trial_cp, directions = (
-            self._principal_decomposition_compression_positive(stress_trial_cp)
-        )
-
-        result = self._principal_return(principal_trial_cp)
-
-        principal_new_cp = result["stress"]
-        stress_new_cp = self._principal_to_cartesian(
-            principal_new_cp,
-            directions,
-        )
-        stress_new_tp = -stress_new_cp
-
-        trial_state = committed_state.copy()
-        trial_state.strain[:] = total_strain_6
-        self._set_effective_stress(trial_state, stress_new_tp)
-        trial_state.yielded = bool(result["yielded"])
-
-        # Accumulate plastic strain for branches with a defined increment.
-        # For the Fortran-style apex treatment this increment is the Koiter
-        # direction obtained from elastic compliance times the correction
-        # stress, matching the reference algorithm.  The legacy geometric
-        # projection mode deliberately leaves the increment undefined.
-        deps_p_principal_cp = result["plastic_strain_increment_principal"]
-        if result["yielded"] and deps_p_principal_cp is not None:
-            deps_p_tensor_cp = (
-                directions
-                @ np.diag(deps_p_principal_cp)
-                @ directions.T
-            )
-            # tension-positive strain convention is the negative of the
-            # temporary compression-positive constitutive convention.
-            deps_p_tensor_tp = -deps_p_tensor_cp
-            deps_p_voigt_tp = self._strain_tensor_to_voigt6(deps_p_tensor_tp)
-            trial_state.plastic_strain[:] = (
-                np.asarray(committed_state.plastic_strain, dtype=float)
-                + deps_p_voigt_tp
-            )
-
-        a13, _, _, _, _, _ = self._mc_plane_vectors()
-        C = self._cohesion_term()
-        yield_function_new = self._yield_value(
-            principal_new_cp,
-            a13,
-            C,
-        )
-
-        q_new = self._q_from_principal(principal_new_cp)
-        p_new_cp = float(np.mean(principal_new_cp))
-        dlambda = np.asarray(result["dlambda"], dtype=float).reshape(-1)
-
-        trial_state.internal_variables["mc_region"] = result["region"]
-        trial_state.internal_variables["yield_function_trial"] = float(
-            result["yield_function_trial"]
-        )
-        trial_state.internal_variables["yield_function"] = float(
-            yield_function_new
-        )
-        trial_state.internal_variables["plastic_multiplier"] = float(
-            np.sum(dlambda) if dlambda.size else 0.0
-        )
-        trial_state.internal_variables["plastic_multipliers"] = dlambda.copy()
-        trial_state.internal_variables["q"] = float(q_new)
-        trial_state.internal_variables["p_compression_positive"] = p_new_cp
-        trial_state.internal_variables["principal_trial_compression_positive"] = (
-            principal_trial_cp.copy()
-        )
-        trial_state.internal_variables["principal_new_compression_positive"] = (
-            principal_new_cp.copy()
-        )
-        trial_state.internal_variables["principal_directions"] = directions.copy()
-        trial_state.internal_variables["principal_jacobian"] = result[
-            "principal_jacobian"
-        ].copy()
-
-        if "apex_correction_stress_principal" in result:
-            trial_state.internal_variables[
-                "apex_correction_stress_principal"
-            ] = np.asarray(
-                result["apex_correction_stress_principal"],
-                dtype=float,
-            ).copy()
-            trial_state.internal_variables[
-                "apex_koiter_direction_principal"
-            ] = np.asarray(
-                result["apex_koiter_direction_principal"],
-                dtype=float,
-            ).copy()
-            trial_state.internal_variables["apex_alpha"] = float(
-                self.apex_alpha
-            )
-
-        return trial_state
+        """Backward-compatible local-map helper returning only the state."""
+        return self._integrate_local_result(
+            total_strain_2d=total_strain_2d,
+            strain_increment_2d=strain_increment_2d,
+            committed_state=committed_state,
+            profiler=profiler,
+        ).state
 
     # =========================================================================
     # NUMERICAL 2-D TANGENT FALLBACK
@@ -930,38 +1341,50 @@ class MohrCoulomb(ConstitutiveModel):
         self,
         total_strain_2d,
         committed_state,
+        profiler=None,
     ):
         """Differentiate the exact 2-D local constitutive map numerically."""
-        epsilon = np.asarray(total_strain_2d, dtype=float).reshape(3)
-        C_alg = np.zeros((3, 3), dtype=float)
+        profile_start = _mc_profile_start(profiler)
+        _mc_profile_increment(profiler, "mc_numerical_tangent_fallbacks")
+        try:
+            epsilon = np.asarray(total_strain_2d, dtype=float).reshape(3)
+            C_alg = np.zeros((3, 3), dtype=float)
 
-        for j in range(3):
-            h = self.tangent_perturbation * max(1.0, abs(epsilon[j]))
+            for j in range(3):
+                h = self.tangent_perturbation * max(1.0, abs(epsilon[j]))
 
-            epsilon_plus = epsilon.copy()
-            epsilon_minus = epsilon.copy()
-            epsilon_plus[j] += h
-            epsilon_minus[j] -= h
+                epsilon_plus = epsilon.copy()
+                epsilon_minus = epsilon.copy()
+                epsilon_plus[j] += h
+                epsilon_minus[j] -= h
 
-            state_plus = self._integrate_state(
-                epsilon_plus,
-                epsilon_plus - committed_state.strain_2d,
-                committed_state,
+                state_plus = self._integrate_state(
+                    epsilon_plus,
+                    epsilon_plus - committed_state.strain_2d,
+                    committed_state,
+                    profiler=profiler,
+                )
+                state_minus = self._integrate_state(
+                    epsilon_minus,
+                    epsilon_minus - committed_state.strain_2d,
+                    committed_state,
+                    profiler=profiler,
+                )
+
+                sigma_plus = self._stress_2d_from_state(state_plus)
+                sigma_minus = self._stress_2d_from_state(state_minus)
+
+                C_alg[:, j] = (sigma_plus - sigma_minus) / (2.0 * h)
+
+            # Do NOT symmetrize: non-associated Mohr-Coulomb generally has a
+            # genuinely non-symmetric algorithmic tangent.
+            return C_alg
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_numerical_tangent_fallback",
+                profile_start,
             )
-            state_minus = self._integrate_state(
-                epsilon_minus,
-                epsilon_minus - committed_state.strain_2d,
-                committed_state,
-            )
-
-            sigma_plus = self._stress_2d_from_state(state_plus)
-            sigma_minus = self._stress_2d_from_state(state_minus)
-
-            C_alg[:, j] = (sigma_plus - sigma_minus) / (2.0 * h)
-
-        # Do NOT symmetrize: non-associated Mohr-Coulomb generally has a
-        # genuinely non-symmetric algorithmic tangent.
-        return C_alg
 
     # =========================================================================
     # PUBLIC CONSTITUTIVE INTERFACE
@@ -975,83 +1398,56 @@ class MohrCoulomb(ConstitutiveModel):
         context=None,
     ):
         """Return one complete GeoPyFEM Mohr-Coulomb constitutive response."""
-        total_strain_2d = np.asarray(total_strain_2d, dtype=float).reshape(3)
-        strain_increment_2d = np.asarray(
-            strain_increment_2d, dtype=float
-        ).reshape(3)
-
-        trial_state = self._integrate_state(
-            total_strain_2d,
-            strain_increment_2d,
-            committed_state,
+        profiler = (
+            None
+            if context is None
+            else getattr(context, "performance_profiler", None)
         )
+        profile_start = _mc_profile_start(profiler)
+        _mc_profile_increment(profiler, "mc_constitutive_calls")
 
-        region = trial_state.internal_variables.get("mc_region", "elastic")
-        tangent_mode = "elastic"
+        try:
+            total_strain_2d = np.asarray(
+                total_strain_2d,
+                dtype=float,
+            ).reshape(3)
+            strain_increment_2d = np.asarray(
+                strain_increment_2d,
+                dtype=float,
+            ).reshape(3)
 
-        if not trial_state.yielded:
-            C_alg_2d = self._C_plane_strain.copy()
-
-        elif region == "apex_projection":
-            # Legacy diagnostic mode only.
-            C_alg_2d = np.zeros((3, 3), dtype=float)
-            tangent_mode = "apex_zero_legacy_projection"
-
-        elif region == "apex_fortran":
-            directions = np.asarray(
-                trial_state.internal_variables["principal_directions"],
-                dtype=float,
+            local_result = self._integrate_local_result(
+                total_strain_2d,
+                strain_increment_2d,
+                committed_state,
+                profiler=profiler,
             )
-            H = np.asarray(
-                trial_state.internal_variables["principal_jacobian"],
-                dtype=float,
-            )
-            C_alg_6d = self._apex_cartesian_tangent_6d(
-                directions=directions,
-                H=H,
-            )
-            C_alg_2d = C_alg_6d[
-                np.ix_(
-                    self._PLANE_STRAIN_INDICES,
-                    self._PLANE_STRAIN_INDICES,
-                )
-            ].copy()
-            tangent_mode = "fortran_modified_apex_single_singular"
-
-        else:
-            principal_trial_cp = np.asarray(
-                trial_state.internal_variables[
-                    "principal_trial_compression_positive"
-                ],
-                dtype=float,
-            )
-            principal_new_cp = np.asarray(
-                trial_state.internal_variables[
-                    "principal_new_compression_positive"
-                ],
-                dtype=float,
-            )
-            directions = np.asarray(
-                trial_state.internal_variables["principal_directions"],
-                dtype=float,
-            )
-            H = np.asarray(
-                trial_state.internal_variables["principal_jacobian"],
-                dtype=float,
-            )
-
-            if self._has_repeated_principal_stress(principal_trial_cp):
-                C_alg_2d = self._numerical_algorithmic_tangent_2d(
-                    total_strain_2d,
-                    committed_state,
-                )
-                tangent_mode = "numerical_repeated_eigenvalue_fallback"
+            trial_state = local_result.state
+            region = local_result.region
+            _mc_profile_increment(profiler, f"mc_region_{region}")
+            if trial_state.yielded:
+                _mc_profile_increment(profiler, "mc_plastic_calls")
             else:
-                C_alg_6d = self._analytic_cartesian_tangent_6d(
-                    principal_trial_cp,
-                    principal_new_cp,
-                    directions,
-                    H,
+                _mc_profile_increment(profiler, "mc_elastic_calls")
+
+            tangent_start = _mc_profile_start(profiler)
+            tangent_mode = "elastic"
+
+            if not trial_state.yielded:
+                C_alg_2d = self._C_plane_strain.copy()
+
+            elif region == "apex_projection":
+                # Legacy diagnostic mode only.
+                C_alg_2d = np.zeros((3, 3), dtype=float)
+                tangent_mode = "apex_zero_legacy_projection"
+
+            elif region == "apex_fortran":
+                directions = local_result.principal_directions
+                H = local_result.principal_jacobian
+                C_alg_6d = self._apex_cartesian_tangent_6d(
+                    directions=directions,
+                    H=H,
+                    profiler=profiler,
                 )
                 C_alg_2d = C_alg_6d[
                     np.ix_(
@@ -1059,32 +1455,87 @@ class MohrCoulomb(ConstitutiveModel):
                         self._PLANE_STRAIN_INDICES,
                     )
                 ].copy()
-                tangent_mode = "analytic_spectral"
+                tangent_mode = "fortran_modified_apex_single_singular"
 
-        trial_state.internal_variables["tangent_mode"] = tangent_mode
+            else:
+                principal_trial_cp = (
+                    local_result.principal_trial_compression_positive
+                )
+                principal_new_cp = (
+                    local_result.principal_new_compression_positive
+                )
+                directions = local_result.principal_directions
+                H = local_result.principal_jacobian
 
-        return ConstitutiveResponse(
-            state=trial_state,
-            tangent=C_alg_2d,
-            diagnostics={
-                "yielded": bool(trial_state.yielded),
-                "region": region,
-                "tangent_mode": tangent_mode,
-                "yield_function": trial_state.internal_variables.get(
-                    "yield_function"
-                ),
-                "yield_function_trial": trial_state.internal_variables.get(
-                    "yield_function_trial"
-                ),
-                "plastic_multiplier": trial_state.internal_variables.get(
-                    "plastic_multiplier"
-                ),
-                "q": trial_state.internal_variables.get("q"),
-                "p_compression_positive": trial_state.internal_variables.get(
-                    "p_compression_positive"
-                ),
-            },
-        )
+                if self._has_repeated_principal_stress(principal_trial_cp):
+                    C_alg_2d = self._numerical_algorithmic_tangent_2d(
+                        total_strain_2d,
+                        committed_state,
+                        profiler=profiler,
+                    )
+                    tangent_mode = "numerical_repeated_eigenvalue_fallback"
+                else:
+                    C_alg_6d = self._analytic_cartesian_tangent_6d(
+                        principal_trial_cp,
+                        principal_new_cp,
+                        directions,
+                        H,
+                        profiler=profiler,
+                    )
+                    C_alg_2d = C_alg_6d[
+                        np.ix_(
+                            self._PLANE_STRAIN_INDICES,
+                            self._PLANE_STRAIN_INDICES,
+                        )
+                    ].copy()
+                    tangent_mode = "analytic_spectral"
+
+            _mc_profile_add(
+                profiler,
+                "mc_tangent_total",
+                tangent_start,
+            )
+            _mc_profile_increment(
+                profiler,
+                f"mc_tangent_mode_{tangent_mode}",
+            )
+
+            # Keep the lightweight mode label for backward-compatible
+            # post-run inspection; the heavy spectral work arrays remain
+            # transient in ``local_result``.
+            trial_state.internal_variables["tangent_mode"] = tangent_mode
+
+            response_start = _mc_profile_start(profiler)
+            response = ConstitutiveResponse(
+                state=trial_state,
+                tangent=C_alg_2d,
+                diagnostics={
+                    "yielded": bool(trial_state.yielded),
+                    "region": region,
+                    "tangent_mode": tangent_mode,
+                    "yield_function": local_result.yield_function,
+                    "yield_function_trial": (
+                        local_result.yield_function_trial
+                    ),
+                    "plastic_multiplier": local_result.plastic_multiplier,
+                    "q": local_result.q,
+                    "p_compression_positive": (
+                        local_result.p_compression_positive
+                    ),
+                },
+            )
+            _mc_profile_add(
+                profiler,
+                "mc_response_construction",
+                response_start,
+            )
+            return response
+        finally:
+            _mc_profile_add(
+                profiler,
+                "mc_integrate_total",
+                profile_start,
+            )
 
     # =========================================================================
     # BACKWARD-COMPATIBILITY HELPERS

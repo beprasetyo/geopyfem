@@ -1,7 +1,83 @@
 import numpy as np
 
+
 from assembly.load_vector import _newton_to_problem_force_scale
 from elements.elemtype import get_element_type
+
+
+class K0OverburdenIndex:
+    """Reusable spatial index for exact vertical K0 overburden integration.
+
+    The previous K0 implementation tested every active continuum element for
+    every Gauss point.  That is exact, but it scales as O(N_gp * N_element)
+    expensive polygon/vertical-line intersection calls.
+
+    This index keeps the same exact polygon intersection kernel, while
+    precomputing cheap axis-aligned bounds once.  For a query point (x, y),
+    only elements whose x-range contains x and whose top lies above y can
+    possibly contribute to the overburden column.  Candidate indices preserve
+    the original mesh order, so the accumulated stress follows the same
+    floating-point summation order as the historical brute-force algorithm.
+    """
+
+    def __init__(self, column_elements):
+        self.elements = tuple(column_elements)
+
+        if not self.elements:
+            self.xmin = np.empty(0, dtype=float)
+            self.xmax = np.empty(0, dtype=float)
+            self.ymax = np.empty(0, dtype=float)
+            return
+
+        self.xmin = np.asarray(
+            [float(np.min(item["polygon"][:, 0])) for item in self.elements],
+            dtype=float,
+        )
+        self.xmax = np.asarray(
+            [float(np.max(item["polygon"][:, 0])) for item in self.elements],
+            dtype=float,
+        )
+        self.ymax = np.asarray(
+            [float(np.max(item["polygon"][:, 1])) for item in self.elements],
+            dtype=float,
+        )
+
+        # Geometry is immutable during the current small-strain K0 procedure.
+        self.xmin.setflags(write=False)
+        self.xmax.setflags(write=False)
+        self.ymax.setflags(write=False)
+
+    def __len__(self):
+        return len(self.elements)
+
+    def __iter__(self):
+        return iter(self.elements)
+
+    def __getitem__(self, index):
+        return self.elements[index]
+
+    def candidate_indices(self, x, y, tolerance=1.0e-12):
+        """Return mesh-order candidate elements that can contribute.
+
+        The filter is conservative and exact:
+
+        * x must lie inside the element's corner-polygon x-range, including
+          the same tolerance used by the exact intersection routine; and
+        * the element top must lie more than ``tolerance`` above the query
+          point, otherwise its possible contribution is zero by definition.
+
+        Exact vertical/polygon intersection is still evaluated for every
+        returned candidate, so no geometric approximation is introduced.
+        """
+        if not self.elements:
+            return np.empty(0, dtype=int)
+
+        mask = (
+            (self.xmin <= float(x) + tolerance)
+            & (self.xmax >= float(x) - tolerance)
+            & (self.ymax > float(y) + tolerance)
+        )
+        return np.flatnonzero(mask)
 
 
 def _vertical_intersection_interval(polygon, x, tolerance=1.0e-12):
@@ -87,7 +163,7 @@ def _build_overburden_column_data(
     units,
     active_element_ids=None,
 ):
-    """Precompute element polygons and unit weights used by K0 integration."""
+    """Precompute exact K0 column geometry and its spatial candidate index."""
     gravity = gravity or {}
 
     if not gravity.get("enabled", False):
@@ -162,26 +238,51 @@ def _build_overburden_column_data(
             "element_id": element_id,
         })
 
-    return column_elements
+    return K0OverburdenIndex(column_elements)
 
 
 def _vertical_total_stress_compression(
     x,
     y,
     column_elements,
+    return_candidate_count=False,
 ):
     """
     Integrate total overburden stress vertically above point (x,y).
 
     Compression is returned positive here. GeoPyFEM's stored stress convention
     is tension-positive, so the value is negated when written to state.stress.
+
+    ``column_elements`` may be either the new :class:`K0OverburdenIndex` or a
+    historical iterable of element dictionaries.  The latter path is retained
+    as an exact brute-force reference for regression testing/backward internal
+    compatibility.
     """
     sigma_v = 0.0
 
     scale = max(1.0, abs(x), abs(y))
     tol = 1.0e-10 * scale
 
-    for item in column_elements:
+    if isinstance(column_elements, K0OverburdenIndex):
+        candidate_indices = column_elements.candidate_indices(
+            x=x,
+            y=y,
+            tolerance=tol,
+        )
+        candidate_count = int(candidate_indices.size)
+        items = (
+            column_elements.elements[int(index)]
+            for index in candidate_indices
+        )
+    else:
+        items = iter(column_elements)
+        try:
+            candidate_count = len(column_elements)
+        except TypeError:
+            items = tuple(items)
+            candidate_count = len(items)
+
+    for item in items:
         interval = _vertical_intersection_interval(
             item["polygon"],
             x,
@@ -202,7 +303,10 @@ def _vertical_total_stress_compression(
                 * thickness
             )
 
-    return float(sigma_v)
+    sigma_v = float(sigma_v)
+    if return_candidate_count:
+        return sigma_v, int(candidate_count)
+    return sigma_v
 
 
 def initialize_k0_stress(
@@ -275,7 +379,7 @@ def initialize_k0_stress(
             )
         region_values[region] = value
 
-    column_elements = _build_overburden_column_data(
+    overburden_index = _build_overburden_column_data(
         nodes=nodes,
         mesh_elements=mesh_elements,
         material_models=material_models,
@@ -290,6 +394,8 @@ def initialize_k0_stress(
     minimum_effective_sigma_v = None
     maximum_effective_sigma_v = None
     total_points = 0
+    overburden_candidate_checks = 0
+    overburden_bruteforce_checks = 0
 
     active_element_ids = (
         None
@@ -342,11 +448,16 @@ def initialize_k0_stress(
                 0.0,
             )
 
-            sigma_v_total = _vertical_total_stress_compression(
-                x=x,
-                y=y,
-                column_elements=column_elements,
+            sigma_v_total, candidate_count = (
+                _vertical_total_stress_compression(
+                    x=x,
+                    y=y,
+                    column_elements=overburden_index,
+                    return_candidate_count=True,
+                )
             )
+            overburden_candidate_checks += candidate_count
+            overburden_bruteforce_checks += len(overburden_index)
 
             sigma_v_effective = max(
                 sigma_v_total - pore_pressure,
@@ -451,4 +562,16 @@ def initialize_k0_stress(
             maximum_effective_sigma_v
         ),
         "maximum_pore_pressure": float(maximum_u),
+        "overburden_index_elements": int(len(overburden_index)),
+        "overburden_candidate_checks": int(overburden_candidate_checks),
+        "overburden_bruteforce_equivalent_checks": int(
+            overburden_bruteforce_checks
+        ),
+        "overburden_average_candidates_per_gp": float(
+            overburden_candidate_checks / max(total_points, 1)
+        ),
+        "overburden_candidate_reduction_factor": float(
+            overburden_bruteforce_checks
+            / max(overburden_candidate_checks, 1)
+        ),
     }
